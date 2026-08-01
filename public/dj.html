@@ -41,7 +41,9 @@ socket.emit('register', { role: 'dj' });
 
 const onlyCallerId = new URLSearchParams(location.search).get('only');
 
-const rtcConfig = RTC_CONFIG;
+let resolvedRtcConfig = null;
+RTC_CONFIG_PROMISE.then((cfg) => { resolvedRtcConfig = cfg; });
+async function getRtc() { if (!resolvedRtcConfig) resolvedRtcConfig = await RTC_CONFIG_PROMISE; return resolvedRtcConfig; }
 let currentPC = null;
 let currentCallerId = null;
 let audioUnlocked = false;
@@ -80,7 +82,7 @@ async function connectToCaller(callerId, name) {
   cleanupCurrent();
   currentCallerId = callerId;
 
-  const pc = new RTCPeerConnection(rtcConfig);
+  const pc = new RTCPeerConnection(await getRtc());
   currentPC = pc;
 
   pc.addTransceiver('audio', { direction: 'recvonly' });
