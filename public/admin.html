@@ -36,7 +36,9 @@ socket.emit('register', { role: 'admin' });
 
 document.getElementById('callerLink').textContent = location.origin + '/caller.html';
 
-const rtcConfig = RTC_CONFIG;
+let resolvedRtcConfig = null;
+RTC_CONFIG_PROMISE.then((cfg) => { resolvedRtcConfig = cfg; });
+async function getRtc() { if (!resolvedRtcConfig) resolvedRtcConfig = await RTC_CONFIG_PROMISE; return resolvedRtcConfig; }
 const previewPCs = {}; // callerId -> RTCPeerConnection
 const talkbackPCs = {}; // callerId -> RTCPeerConnection (solo talk)
 let talkbackStream = null;
@@ -64,7 +66,7 @@ function setupMeter(stream, meterEl) {
 
 async function connectPreview(callerId) {
   if (previewPCs[callerId]) return;
-  const pc = new RTCPeerConnection(rtcConfig);
+  const pc = new RTCPeerConnection(await getRtc());
   previewPCs[callerId] = pc;
 
   pc.addTransceiver('audio', { direction: 'recvonly' });
@@ -121,7 +123,7 @@ async function toggleTalkback(callerId, btn) {
     alert('Could not access your microphone for solo talk.');
     return;
   }
-  const pc = new RTCPeerConnection(rtcConfig);
+  const pc = new RTCPeerConnection(await getRtc());
   talkbackPCs[callerId] = pc;
   talkbackStream.getTracks().forEach((t) => pc.addTrack(t, talkbackStream));
   pc.onicecandidate = (e) => {
