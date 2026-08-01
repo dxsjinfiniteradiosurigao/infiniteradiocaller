@@ -11,6 +11,14 @@
   <h1>🎛️ Call-In Control Panel</h1>
   <div class="subtitle">Preview waiting callers, then push one live to the DJ screens.</div>
 
+  <div class="card" style="margin-bottom:16px;">
+    <div style="font-weight:600; margin-bottom:8px;">📢 Message everyone waiting</div>
+    <div style="display:flex; gap:8px;">
+      <input type="text" id="broadcastInput" placeholder="e.g. You're up next, stand by!" style="flex:1;" />
+      <button class="btn-primary" id="broadcastBtn">Send to All</button>
+    </div>
+  </div>
+
   <div id="grid" class="grid"></div>
   <div id="emptyMsg" class="empty-msg">No one is waiting yet. Share your caller link to get started.</div>
 
@@ -32,6 +40,25 @@ const previewPCs = {}; // callerId -> RTCPeerConnection
 const tiles = {}; // callerId -> DOM element
 let currentList = [];
 
+function setupMeter(stream, meterEl) {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    function tick() {
+      if (!meterEl.isConnected) return; // tile removed, stop looping
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a, b) => a + b, 0) / data.length;
+      meterEl.style.width = Math.min(100, avg * 1.5) + '%';
+      requestAnimationFrame(tick);
+    }
+    tick();
+  } catch (e) { /* ignore */ }
+}
+
 async function connectPreview(callerId) {
   if (previewPCs[callerId]) return;
   const pc = new RTCPeerConnection(rtcConfig);
@@ -44,7 +71,17 @@ async function connectPreview(callerId) {
     const tile = tiles[callerId];
     if (!tile) return;
     const video = tile.querySelector('video');
-    if (video.srcObject !== e.streams[0]) video.srcObject = e.streams[0];
+    const stream = e.streams[0];
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+      // Browsers block unmuted autoplay - start muted, admin can unmute per tile.
+      video.muted = true;
+      video.play().catch(() => {});
+      const meter = tile.querySelector('.micMeter');
+      if (stream.getAudioTracks().length) setupMeter(stream, meter);
+      const hasVideo = stream.getVideoTracks().length > 0;
+      tile.querySelector('.noVideoNote').style.display = hasVideo ? 'none' : 'block';
+    }
   };
 
   pc.onicecandidate = (e) => {
@@ -95,9 +132,24 @@ function renderList(list) {
           <span class="status-pill"><span class="dot"></span><span class="statusText">waiting</span></span>
         </div>
         <video autoplay playsinline></video>
+        <div class="noVideoNote" style="font-size:0.75rem; color:var(--muted); margin-top:4px;">No camera - audio only</div>
+        <div style="margin-top:8px;">
+          <div style="height:6px; background:#2a2e38; border-radius:3px; overflow:hidden;">
+            <div class="micMeter" style="height:100%; width:0%; background:#2ecc71; transition:width 0.1s;"></div>
+          </div>
+          <div class="subtitle" style="margin-top:4px; font-size:0.7rem;">Mic level</div>
+        </div>
         <div class="tile-actions">
           <button class="btn-live goLiveBtn">Go Live</button>
           <button class="btn-stop stopBtn" style="display:none;">Stop</button>
+          <button class="btn-ghost unmuteBtn">🔇 Unmute preview</button>
+        </div>
+        <div class="tile-actions">
+          <button class="btn-ghost toggleMicBtn" data-on="true">🎙️ Mic: On</button>
+          <button class="btn-ghost toggleCamBtn" data-on="true">📷 Cam: On</button>
+        </div>
+        <div class="tile-actions">
+          <button class="btn-ghost msgBtn">💬 Private message</button>
           <button class="btn-ghost removeBtn">Remove</button>
         </div>
       `;
@@ -108,6 +160,33 @@ function renderList(list) {
       tile.querySelector('.goLiveBtn').onclick = () => socket.emit('go-live', { callerId: c.id });
       tile.querySelector('.stopBtn').onclick = () => socket.emit('stop-live', { callerId: c.id });
       tile.querySelector('.removeBtn').onclick = () => socket.emit('remove-caller', { callerId: c.id });
+
+      tile.querySelector('.unmuteBtn').onclick = (ev) => {
+        const video = tile.querySelector('video');
+        video.muted = !video.muted;
+        ev.target.textContent = video.muted ? '🔇 Unmute preview' : '🔊 Mute preview';
+      };
+
+      tile.querySelector('.toggleMicBtn').onclick = (ev) => {
+        const nowOn = ev.target.dataset.on !== 'true';
+        ev.target.dataset.on = String(nowOn);
+        ev.target.textContent = '🎙️ Mic: ' + (nowOn ? 'On' : 'Off');
+        socket.emit('set-caller-media', { callerId: c.id, audio: nowOn });
+      };
+
+      tile.querySelector('.toggleCamBtn').onclick = (ev) => {
+        const nowOn = ev.target.dataset.on !== 'true';
+        ev.target.dataset.on = String(nowOn);
+        ev.target.textContent = '📷 Cam: ' + (nowOn ? 'On' : 'Off');
+        socket.emit('set-caller-media', { callerId: c.id, video: nowOn });
+      };
+
+      tile.querySelector('.msgBtn').onclick = () => {
+        const text = prompt('Private message to ' + c.name + ':');
+        if (text && text.trim()) {
+          socket.emit('private-message', { callerId: c.id, text: text.trim() });
+        }
+      };
     }
 
     // update live state UI
@@ -138,6 +217,17 @@ function escapeHtml(str) {
 }
 
 socket.on('waiting-list', renderList);
+
+document.getElementById('broadcastBtn').onclick = () => {
+  const input = document.getElementById('broadcastInput');
+  const text = input.value.trim();
+  if (!text) return;
+  socket.emit('broadcast-message', { text });
+  input.value = '';
+};
+document.getElementById('broadcastInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('broadcastBtn').click();
+});
 </script>
 </body>
 </html>
