@@ -32,6 +32,12 @@
       </div>
       <div class="subtitle" style="margin-top:6px;">Mic level</div>
     </div>
+    <div id="mediaStatus" style="margin-top:10px; font-size:0.85rem; color:var(--muted);"></div>
+  </div>
+
+  <div id="messageBanner" style="display:none; margin-top:16px;" class="card">
+    <div id="messageLabel" style="font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Message from host</div>
+    <div id="messageText" style="font-weight:600;"></div>
   </div>
 </div>
 
@@ -139,6 +145,32 @@ socket.on('kicked', () => {
   document.getElementById('waitStatus').textContent = 'You have been removed by the host.';
   Object.values(peerConnections).forEach((pc) => pc.close());
   if (localStream) localStream.getTracks().forEach((t) => t.stop());
+});
+
+socket.on('host-message', ({ text, private: isPrivate }) => {
+  const banner = document.getElementById('messageBanner');
+  const label = document.getElementById('messageLabel');
+  const body = document.getElementById('messageText');
+  label.textContent = isPrivate ? 'Private message from host' : 'Message from host';
+  body.textContent = text;
+  banner.style.display = 'block';
+  clearTimeout(window._msgTimer);
+  window._msgTimer = setTimeout(() => { banner.style.display = 'none'; }, 15000);
+});
+
+socket.on('media-control', ({ audio, video }) => {
+  if (!localStream) return;
+  const statusEl = document.getElementById('mediaStatus');
+  const parts = [];
+  if (typeof audio === 'boolean') {
+    localStream.getAudioTracks().forEach((t) => (t.enabled = audio));
+    parts.push('Mic ' + (audio ? 'on' : 'muted by host'));
+  }
+  if (typeof video === 'boolean') {
+    localStream.getVideoTracks().forEach((t) => (t.enabled = video));
+    parts.push('Camera ' + (video ? 'on' : 'turned off by host'));
+  }
+  statusEl.textContent = parts.join(' · ');
 });
 </script>
 </body>
