@@ -16,17 +16,69 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/api/turn-credentials', async (req, res) => {
   const apiKey = process.env.METERED_API_KEY;
   const subdomain = process.env.METERED_SUBDOMAIN;
+
   if (!apiKey || !subdomain) {
-    return res.json({ iceServers: [] });
+    // Tell the browser *which* env var is missing, without leaking the key itself.
+    return res.json({
+      iceServers: [],
+      debug: {
+        reason: 'missing-env-vars',
+        hasApiKey: !!apiKey,
+        hasSubdomain: !!subdomain
+      }
+    });
   }
+
   try {
     const url = `https://${subdomain}.metered.live/api/v1/turn/credentials?apiKey=${encodeURIComponent(apiKey)}`;
     const r = await fetch(url);
-    const data = await r.json();
-    res.json({ iceServers: Array.isArray(data) ? data : [] });
+    const rawText = await r.text();
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseErr) {
+      console.error('TURN credential response was not valid JSON:', rawText.slice(0, 200));
+      return res.json({
+        iceServers: [],
+        debug: {
+          reason: 'invalid-json-response',
+          httpStatus: r.status,
+          bodyPreview: rawText.slice(0, 200)
+        }
+      });
+    }
+
+    if (!r.ok) {
+      console.error('TURN credential fetch returned non-OK status:', r.status, data);
+      return res.json({
+        iceServers: [],
+        debug: {
+          reason: 'metered-api-error',
+          httpStatus: r.status,
+          body: data
+        }
+      });
+    }
+
+    if (!Array.isArray(data) || data.length === 0) {
+      return res.json({
+        iceServers: [],
+        debug: {
+          reason: 'empty-or-unexpected-response',
+          httpStatus: r.status,
+          body: data
+        }
+      });
+    }
+
+    res.json({ iceServers: data, debug: { reason: 'ok', count: data.length } });
   } catch (e) {
     console.error('TURN credential fetch failed:', e.message);
-    res.json({ iceServers: [] });
+    res.json({
+      iceServers: [],
+      debug: { reason: 'fetch-threw', message: e.message }
+    });
   }
 });
 
