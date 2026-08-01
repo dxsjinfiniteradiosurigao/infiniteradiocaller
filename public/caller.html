@@ -48,7 +48,8 @@
 const socket = io();
 let localStream = null;
 const peerConnections = {}; // remoteId -> RTCPeerConnection
-const rtcConfig = RTC_CONFIG;
+let rtcConfig = null;
+RTC_CONFIG_PROMISE.then((cfg) => { rtcConfig = cfg; });
 
 document.getElementById('joinBtn').onclick = async () => {
   const name = document.getElementById('nameInput').value.trim();
@@ -99,9 +100,10 @@ function setupMicMeter(stream) {
   } catch (e) { /* ignore */ }
 }
 
-function getOrCreatePC(remoteId, purpose) {
+async function getOrCreatePC(remoteId, purpose) {
   const key = remoteId + ':' + (purpose || 'main');
   if (peerConnections[key]) return peerConnections[key];
+  if (!rtcConfig) rtcConfig = await RTC_CONFIG_PROMISE;
   const pc = new RTCPeerConnection(rtcConfig);
   peerConnections[key] = pc;
 
@@ -141,7 +143,7 @@ function getOrCreatePC(remoteId, purpose) {
 // Any admin (for preview), DJ (when live), or admin-talkback sends us an offer.
 socket.on('signal', async ({ from, data }) => {
   const purpose = data.purpose || 'main';
-  const pc = getOrCreatePC(from, purpose);
+  const pc = await getOrCreatePC(from, purpose);
   if (data.type === 'offer') {
     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
     const answer = await pc.createAnswer();
