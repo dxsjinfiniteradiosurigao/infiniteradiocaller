@@ -33,6 +33,7 @@
       <div class="subtitle" style="margin-top:6px;">Mic level</div>
     </div>
     <div id="mediaStatus" style="margin-top:10px; font-size:0.85rem; color:var(--muted);"></div>
+    <div id="connStatusLine" style="margin-top:4px; font-size:0.75rem; color:var(--muted);"></div>
   </div>
 
   <div id="messageBanner" style="display:none; margin-top:16px;" class="card">
@@ -42,11 +43,12 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
+<script src="/rtc-config.js"></script>
 <script>
 const socket = io();
 let localStream = null;
 const peerConnections = {}; // remoteId -> RTCPeerConnection
-const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const rtcConfig = RTC_CONFIG;
 
 document.getElementById('joinBtn').onclick = async () => {
   const name = document.getElementById('nameInput').value.trim();
@@ -97,32 +99,54 @@ function setupMicMeter(stream) {
   } catch (e) { /* ignore */ }
 }
 
-function getOrCreatePC(remoteId) {
-  if (peerConnections[remoteId]) return peerConnections[remoteId];
+function getOrCreatePC(remoteId, purpose) {
+  const key = remoteId + ':' + (purpose || 'main');
+  if (peerConnections[key]) return peerConnections[key];
   const pc = new RTCPeerConnection(rtcConfig);
-  peerConnections[remoteId] = pc;
+  peerConnections[key] = pc;
 
-  if (localStream) {
+  if (purpose !== 'talkback' && localStream) {
     localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
   }
 
+  if (purpose === 'talkback') {
+    // Admin is whispering privately to this caller - play it through an audio element.
+    pc.ontrack = (e) => {
+      let audioEl = document.getElementById('talkbackAudio');
+      if (!audioEl) {
+        audioEl = document.createElement('audio');
+        audioEl.id = 'talkbackAudio';
+        audioEl.autoplay = true;
+        document.body.appendChild(audioEl);
+      }
+      audioEl.srcObject = e.streams[0];
+    };
+  }
+
+  pc.onconnectionstatechange = () => {
+    if (purpose === 'talkback') return;
+    const el = document.getElementById('connStatusLine');
+    if (el) el.textContent = 'Studio connection: ' + friendlyIceStatus(pc.connectionState);
+  };
+
   pc.onicecandidate = (e) => {
     if (e.candidate) {
-      socket.emit('signal', { to: remoteId, data: { type: 'candidate', candidate: e.candidate } });
+      socket.emit('signal', { to: remoteId, data: { type: 'candidate', candidate: e.candidate, purpose } });
     }
   };
 
   return pc;
 }
 
-// Any admin (for preview) or DJ (when live) sends us an offer requesting our stream.
+// Any admin (for preview), DJ (when live), or admin-talkback sends us an offer.
 socket.on('signal', async ({ from, data }) => {
-  const pc = getOrCreatePC(from);
+  const purpose = data.purpose || 'main';
+  const pc = getOrCreatePC(from, purpose);
   if (data.type === 'offer') {
     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    socket.emit('signal', { to: from, data: { type: 'answer', sdp: answer } });
+    socket.emit('signal', { to: from, data: { type: 'answer', sdp: answer, purpose } });
   } else if (data.type === 'answer') {
     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
   } else if (data.type === 'candidate') {
@@ -137,7 +161,8 @@ socket.on('start-broadcast', () => {
 socket.on('stop-broadcast', ({ djIds }) => {
   document.getElementById('waitStatus').textContent = "You're back in the waiting room...";
   (djIds || []).forEach((id) => {
-    if (peerConnections[id]) { peerConnections[id].close(); delete peerConnections[id]; }
+    const key = id + ':main';
+    if (peerConnections[key]) { peerConnections[key].close(); delete peerConnections[key]; }
   });
 });
 
