@@ -3,28 +3,70 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Admin - Call In Control</title>
+<title>Admin — Call-In Console</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div class="wrap">
-  <h1>🎛️ Call-In Control Panel</h1>
-  <div class="subtitle">Preview waiting callers, then push one live to the DJ screens.</div>
-
-  <div class="card" style="margin-bottom:16px;">
-    <div style="font-weight:600; margin-bottom:8px;">📢 Message everyone waiting</div>
-    <div style="display:flex; gap:8px;">
-      <input type="text" id="broadcastInput" placeholder="e.g. You're up next, stand by!" style="flex:1;" />
-      <button class="btn-primary" id="broadcastBtn">Send to All</button>
+  <div class="masthead">
+    <div>
+      <h1>🎛️ Call-In Console <span class="chip">Admin</span></h1>
+      <div class="subtitle" style="margin-bottom:0;">Preview waiting callers, chat with them, then push one live to the DJ screens.</div>
+    </div>
+    <div class="action-row">
+      <button class="btn-danger-ghost" id="muteAllBtn">🔇 Mute everyone</button>
     </div>
   </div>
 
-  <div id="grid" class="grid"></div>
+  <div class="card">
+    <div class="card-title"><span class="icon">⚙️</span> Console settings</div>
+    <div class="settings-grid">
+      <div>
+        <div class="settings-row">
+          <div class="settings-label">
+            Auto-mute new callers on join
+            <small>New joiners start muted — you unmute per-tile when ready.</small>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="autoMuteToggle">
+            <span class="track"></span>
+          </label>
+        </div>
+      </div>
+      <div>
+        <div class="settings-label" style="margin-bottom:6px;">
+          Waiting-room welcome message
+          <small>Sent automatically to every caller the moment they join.</small>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input type="text" id="welcomeInput" placeholder="e.g. Thanks for calling in! Stay on this page." />
+          <button class="btn-primary btn-sm" id="saveWelcomeBtn">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📢</span> Message everyone waiting</div>
+    <div style="display:flex; gap:8px;">
+      <input type="text" id="broadcastInput" placeholder="e.g. You're up next, stand by!" style="flex:1;" />
+      <button class="btn-primary" id="broadcastBtn">Send to all</button>
+    </div>
+  </div>
+
+  <div id="grid" class="grid" style="margin-top:20px;"></div>
   <div id="emptyMsg" class="empty-msg">No one is waiting yet. Share your caller link to get started.</div>
 
   <div class="card" style="margin-top:24px;">
-    <div style="font-weight:600; margin-bottom:6px;">Caller link to share:</div>
-    <div id="callerLink" style="color:var(--muted); word-break:break-all; font-size:0.9rem;"></div>
+    <div class="card-title"><span class="icon">🔗</span> Links to share</div>
+    <div style="margin-bottom:12px;">
+      <div class="settings-label" style="margin-bottom:6px;">Caller link (post this on Facebook/YouTube/TikTok)</div>
+      <div id="callerLink" class="link-readout"></div>
+    </div>
+    <div>
+      <div class="settings-label" style="margin-bottom:6px;">vMix / OBS browser source (clean video output, no buttons)</div>
+      <div id="vmixLink" class="link-readout"></div>
+    </div>
   </div>
 </div>
 
@@ -35,6 +77,7 @@ const socket = io();
 socket.emit('register', { role: 'admin' });
 
 document.getElementById('callerLink').textContent = location.origin + '/caller.html';
+document.getElementById('vmixLink').textContent = location.origin + '/vmix.html';
 
 let resolvedRtcConfig = null;
 RTC_CONFIG_PROMISE.then((cfg) => { resolvedRtcConfig = cfg; });
@@ -44,6 +87,26 @@ const talkbackPCs = {}; // callerId -> RTCPeerConnection (solo talk)
 let talkbackStream = null;
 const tiles = {}; // callerId -> DOM element
 let currentList = [];
+
+// ---- Settings panel ----
+document.getElementById('autoMuteToggle').onchange = (e) => {
+  socket.emit('update-settings', { autoMuteOnJoin: e.target.checked });
+};
+document.getElementById('saveWelcomeBtn').onclick = () => {
+  socket.emit('update-settings', { welcomeMessage: document.getElementById('welcomeInput').value });
+};
+socket.on('settings-state', (settings) => {
+  document.getElementById('autoMuteToggle').checked = !!settings.autoMuteOnJoin;
+  if (document.activeElement !== document.getElementById('welcomeInput')) {
+    document.getElementById('welcomeInput').value = settings.welcomeMessage || '';
+  }
+});
+
+document.getElementById('muteAllBtn').onclick = () => {
+  if (confirm('Mute every waiting/live caller right now?')) {
+    socket.emit('mute-all');
+  }
+};
 
 function setupMeter(stream, meterEl) {
   try {
@@ -149,6 +212,22 @@ socket.on('signal', async ({ from, data }) => {
   }
 });
 
+function renderChatLog(tile, chat) {
+  const log = tile.querySelector('.chat-log');
+  log.innerHTML = '';
+  if (!chat || !chat.length) {
+    log.innerHTML = '<div class="chat-empty">No messages yet.</div>';
+    return;
+  }
+  chat.forEach((m) => {
+    const div = document.createElement('div');
+    div.className = 'chat-msg from-' + m.from;
+    div.textContent = m.text;
+    log.appendChild(div);
+  });
+  log.scrollTop = log.scrollHeight;
+}
+
 function renderList(list) {
   currentList = list;
   const grid = document.getElementById('grid');
@@ -156,7 +235,6 @@ function renderList(list) {
   emptyMsg.style.display = list.length ? 'none' : 'block';
 
   const currentIds = new Set(list.map((c) => c.id));
-  // Clean up tiles/connections for callers who left
   Object.keys(tiles).forEach((id) => {
     if (!currentIds.has(id)) {
       tiles[id].remove();
@@ -180,31 +258,33 @@ function renderList(list) {
         <video autoplay playsinline></video>
         <div class="noVideoNote" style="font-size:0.75rem; color:var(--muted); margin-top:4px;">No camera - audio only</div>
         <div style="margin-top:8px;">
-          <div style="height:6px; background:#2a2e38; border-radius:3px; overflow:hidden;">
-            <div class="micMeter" style="height:100%; width:0%; background:#2ecc71; transition:width 0.1s;"></div>
-          </div>
+          <div class="meter-track"><div class="micMeter meter-fill"></div></div>
           <div class="subtitle" style="margin-top:4px; font-size:0.7rem;">Mic level</div>
         </div>
         <div class="tile-actions">
-          <button class="btn-live goLiveBtn">Go Live</button>
+          <button class="btn-live goLiveBtn">Go live</button>
           <button class="btn-stop stopBtn" style="display:none;">Stop</button>
           <button class="btn-ghost unmuteBtn">🔇 Unmute preview</button>
         </div>
         <div class="tile-actions">
-          <button class="btn-ghost toggleMicBtn" data-on="true">🎙️ Mic: On</button>
-          <button class="btn-ghost toggleCamBtn" data-on="true">📷 Cam: On</button>
+          <button class="btn-ghost toggleMicBtn" data-on="true">🎙️ Mic: on</button>
+          <button class="btn-ghost toggleCamBtn" data-on="true">📷 Cam: on</button>
         </div>
         <div class="tile-actions">
           <button class="btn-ghost talkBtn">🎧 Solo talk</button>
           <button class="btn-ghost renameBtn">✏️ Rename</button>
         </div>
         <div class="tile-actions">
-          <button class="btn-ghost msgBtn">💬 Private message</button>
           <button class="btn-ghost linkBtn">🔗 Copy solo link</button>
-        </div>
-        <div class="tile-actions">
           <button class="btn-ghost hideBtn">🙈 Hide</button>
-          <button class="btn-ghost removeBtn">Hang up</button>
+          <button class="btn-danger-ghost removeBtn">Hang up</button>
+        </div>
+        <div class="chat-box">
+          <div class="chat-log"></div>
+          <div class="chat-input-row">
+            <input type="text" class="chatInput" placeholder="Message this caller…" />
+            <button class="btn-primary chatSendBtn">Send</button>
+          </div>
         </div>
       `;
       grid.appendChild(tile);
@@ -213,7 +293,9 @@ function renderList(list) {
 
       tile.querySelector('.goLiveBtn').onclick = () => socket.emit('go-live', { callerId: c.id });
       tile.querySelector('.stopBtn').onclick = () => socket.emit('stop-live', { callerId: c.id });
-      tile.querySelector('.removeBtn').onclick = () => socket.emit('remove-caller', { callerId: c.id });
+      tile.querySelector('.removeBtn').onclick = () => {
+        if (confirm('Hang up on ' + c.name + '?')) socket.emit('remove-caller', { callerId: c.id });
+      };
 
       tile.querySelector('.unmuteBtn').onclick = (ev) => {
         const video = tile.querySelector('video');
@@ -224,22 +306,15 @@ function renderList(list) {
       tile.querySelector('.toggleMicBtn').onclick = (ev) => {
         const nowOn = ev.target.dataset.on !== 'true';
         ev.target.dataset.on = String(nowOn);
-        ev.target.textContent = '🎙️ Mic: ' + (nowOn ? 'On' : 'Off');
+        ev.target.textContent = '🎙️ Mic: ' + (nowOn ? 'on' : 'off');
         socket.emit('set-caller-media', { callerId: c.id, audio: nowOn });
       };
 
       tile.querySelector('.toggleCamBtn').onclick = (ev) => {
         const nowOn = ev.target.dataset.on !== 'true';
         ev.target.dataset.on = String(nowOn);
-        ev.target.textContent = '📷 Cam: ' + (nowOn ? 'On' : 'Off');
+        ev.target.textContent = '📷 Cam: ' + (nowOn ? 'on' : 'off');
         socket.emit('set-caller-media', { callerId: c.id, video: nowOn });
-      };
-
-      tile.querySelector('.msgBtn').onclick = () => {
-        const text = prompt('Private message to ' + c.name + ':');
-        if (text && text.trim()) {
-          socket.emit('private-message', { callerId: c.id, text: text.trim() });
-        }
       };
 
       tile.querySelector('.talkBtn').onclick = (ev) => toggleTalkback(c.id, ev.target);
@@ -267,9 +342,18 @@ function renderList(list) {
         video.style.visibility = isHidden ? 'visible' : 'hidden';
         ev.target.textContent = isHidden ? '🙈 Hide' : '👁️ Show';
       };
+
+      const chatInput = tile.querySelector('.chatInput');
+      const sendChat = () => {
+        const text = chatInput.value.trim();
+        if (!text) return;
+        socket.emit('chat-message', { callerId: c.id, text, from: 'admin' });
+        chatInput.value = '';
+      };
+      tile.querySelector('.chatSendBtn').onclick = sendChat;
+      chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
     }
 
-    // update live state UI
     const nameLabel = tile.querySelector('.callerNameLabel');
     if (nameLabel.textContent !== c.name) nameLabel.textContent = c.name;
     const dot = tile.querySelector('.dot');
@@ -289,8 +373,23 @@ function renderList(list) {
       goLiveBtn.style.display = 'inline-block';
       stopBtn.style.display = 'none';
     }
+
+    renderChatLog(tile, c.chat);
   });
 }
+
+socket.on('chat-message', ({ callerId, from, text }) => {
+  const tile = tiles[callerId];
+  if (!tile) return;
+  const log = tile.querySelector('.chat-log');
+  const empty = log.querySelector('.chat-empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.className = 'chat-msg from-' + from;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+});
 
 function escapeHtml(str) {
   const div = document.createElement('div');
