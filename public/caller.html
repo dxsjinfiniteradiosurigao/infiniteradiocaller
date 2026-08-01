@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Call In - 93.3 Infinite Radio Surigao</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap" style="max-width:480px; padding-top:60px;">
+  <h1>📻 Call In to the Show</h1>
+  <div class="subtitle">Enter your name and join the waiting room. The tech team will bring you on air.</div>
+
+  <div class="card" id="joinCard">
+    <input type="text" id="nameInput" placeholder="Your name" maxlength="30" />
+    <label class="check">
+      <input type="checkbox" id="videoToggle" />
+      Enable camera (optional - audio only works fine)
+    </label>
+    <button class="btn-primary" id="joinBtn" style="width:100%; margin-top:10px;">Join Waiting Room</button>
+    <div id="errMsg" style="color:#ff8080; margin-top:10px; font-size:0.85rem;"></div>
+  </div>
+
+  <div class="card" id="waitCard" style="display:none; text-align:center;">
+    <div class="pulse"></div>
+    <div id="waitStatus" style="font-weight:600;">You're in the waiting room...</div>
+    <div class="subtitle" style="margin-top:6px;">Stay on this page. You'll go live automatically when selected.</div>
+    <video id="selfPreview" autoplay muted playsinline style="width:100%; border-radius:8px; margin-top:14px; display:none;"></video>
+    <div id="micLevelWrap" style="margin-top:14px;">
+      <div style="height:8px; background:#2a2e38; border-radius:4px; overflow:hidden;">
+        <div id="micLevel" style="height:100%; width:0%; background:#2ecc71; transition:width 0.1s;"></div>
+      </div>
+      <div class="subtitle" style="margin-top:6px;">Mic level</div>
+    </div>
+    <div id="mediaStatus" style="margin-top:10px; font-size:0.85rem; color:var(--muted);"></div>
+    <div id="connStatusLine" style="margin-top:4px; font-size:0.75rem; color:var(--muted);"></div>
+  </div>
+
+  <div id="messageBanner" style="display:none; margin-top:16px;" class="card">
+    <div id="messageLabel" style="font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Message from host</div>
+    <div id="messageText" style="font-weight:600;"></div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/rtc-config.js"></script>
+<script>
+const socket = io();
+let localStream = null;
+const peerConnections = {}; // remoteId -> RTCPeerConnection
+let rtcConfig = null;
+RTC_CONFIG_PROMISE.then((cfg) => { rtcConfig = cfg; });
+
+document.getElementById('joinBtn').onclick = async () => {
+  const name = document.getElementById('nameInput').value.trim();
+  const wantVideo = document.getElementById('videoToggle').checked;
+  const errMsg = document.getElementById('errMsg');
+  errMsg.textContent = '';
+
+  if (!name) { errMsg.textContent = 'Please enter your name.'; return; }
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: wantVideo ? { width: 320, height: 240 } : false
+    });
+  } catch (e) {
+    errMsg.textContent = 'Could not access microphone/camera. Please allow permission and try again.';
+    return;
+  }
+
+  document.getElementById('joinCard').style.display = 'none';
+  document.getElementById('waitCard').style.display = 'block';
+
+  if (wantVideo) {
+    const preview = document.getElementById('selfPreview');
+    preview.style.display = 'block';
+    preview.srcObject = localStream;
+  }
+
+  setupMicMeter(localStream);
+  socket.emit('register', { role: 'caller', name });
+};
+
+function setupMicMeter(stream) {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    function tick() {
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a, b) => a + b, 0) / data.length;
+      document.getElementById('micLevel').style.width = Math.min(100, avg * 1.5) + '%';
+      requestAnimationFrame(tick);
+    }
+    tick();
+  } catch (e) { /* ignore */ }
+}
+
+async function getOrCreatePC(remoteId, purpose) {
+  const key = remoteId + ':' + (purpose || 'main');
+  if (peerConnections[key]) return peerConnections[key];
+  if (!rtcConfig) rtcConfig = await RTC_CONFIG_PROMISE;
+  const pc = new RTCPeerConnection(rtcConfig);
+  peerConnections[key] = pc;
+
+  if (purpose !== 'talkback' && localStream) {
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+  }
+
+  if (purpose === 'talkback') {
+    // Admin is whispering privately to this caller - play it through an audio element.
+    pc.ontrack = (e) => {
+      let audioEl = document.getElementById('talkbackAudio');
+      if (!audioEl) {
+        audioEl = document.createElement('audio');
+        audioEl.id = 'talkbackAudio';
+        audioEl.autoplay = true;
+        document.body.appendChild(audioEl);
+      }
+      audioEl.srcObject = e.streams[0];
+    };
+  }
+
+  pc.onconnectionstatechange = () => {
+    if (purpose === 'talkback') return;
+    const el = document.getElementById('connStatusLine');
+    if (el) el.textContent = 'Studio connection: ' + friendlyIceStatus(pc.connectionState);
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('signal', { to: remoteId, data: { type: 'candidate', candidate: e.candidate, purpose } });
+    }
+  };
+
+  return pc;
+}
+
+// Any admin (for preview), DJ (when live), or admin-talkback sends us an offer.
+socket.on('signal', async ({ from, data }) => {
+  const purpose = data.purpose || 'main';
+  const pc = await getOrCreatePC(from, purpose);
+  if (data.type === 'offer') {
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('signal', { to: from, data: { type: 'answer', sdp: answer, purpose } });
+  } else if (data.type === 'answer') {
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+  } else if (data.type === 'candidate') {
+    try { await pc.addIceCandidate(data.candidate); } catch (e) {}
+  }
+});
+
+socket.on('start-broadcast', () => {
+  document.getElementById('waitStatus').textContent = "🔴 You're LIVE on air!";
+});
+
+socket.on('stop-broadcast', ({ djIds }) => {
+  document.getElementById('waitStatus').textContent = "You're back in the waiting room...";
+  (djIds || []).forEach((id) => {
+    const key = id + ':main';
+    if (peerConnections[key]) { peerConnections[key].close(); delete peerConnections[key]; }
+  });
+});
+
+socket.on('kicked', () => {
+  document.getElementById('waitStatus').textContent = 'You have been removed by the host.';
+  Object.values(peerConnections).forEach((pc) => pc.close());
+  if (localStream) localStream.getTracks().forEach((t) => t.stop());
+});
+
+socket.on('host-message', ({ text, private: isPrivate }) => {
+  const banner = document.getElementById('messageBanner');
+  const label = document.getElementById('messageLabel');
+  const body = document.getElementById('messageText');
+  label.textContent = isPrivate ? 'Private message from host' : 'Message from host';
+  body.textContent = text;
+  banner.style.display = 'block';
+  clearTimeout(window._msgTimer);
+  window._msgTimer = setTimeout(() => { banner.style.display = 'none'; }, 15000);
+});
+
+socket.on('media-control', ({ audio, video }) => {
+  if (!localStream) return;
+  const statusEl = document.getElementById('mediaStatus');
+  const parts = [];
+  if (typeof audio === 'boolean') {
+    localStream.getAudioTracks().forEach((t) => (t.enabled = audio));
+    parts.push('Mic ' + (audio ? 'on' : 'muted by host'));
+  }
+  if (typeof video === 'boolean') {
+    localStream.getVideoTracks().forEach((t) => (t.enabled = video));
+    parts.push('Camera ' + (video ? 'on' : 'turned off by host'));
+  }
+  statusEl.textContent = parts.join(' · ');
+});
+</script>
+</body>
+</html>
