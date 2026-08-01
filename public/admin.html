@@ -29,14 +29,17 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
+<script src="/rtc-config.js"></script>
 <script>
 const socket = io();
 socket.emit('register', { role: 'admin' });
 
 document.getElementById('callerLink').textContent = location.origin + '/caller.html';
 
-const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const rtcConfig = RTC_CONFIG;
 const previewPCs = {}; // callerId -> RTCPeerConnection
+const talkbackPCs = {}; // callerId -> RTCPeerConnection (solo talk)
+let talkbackStream = null;
 const tiles = {}; // callerId -> DOM element
 let currentList = [];
 
@@ -67,6 +70,13 @@ async function connectPreview(callerId) {
   pc.addTransceiver('audio', { direction: 'recvonly' });
   pc.addTransceiver('video', { direction: 'recvonly' });
 
+  pc.onconnectionstatechange = () => {
+    const tile = tiles[callerId];
+    if (!tile) return;
+    const statusText = tile.querySelector('.connState');
+    if (statusText) statusText.textContent = friendlyIceStatus(pc.connectionState);
+  };
+
   pc.ontrack = (e) => {
     const tile = tiles[callerId];
     if (!tile) return;
@@ -86,17 +96,49 @@ async function connectPreview(callerId) {
 
   pc.onicecandidate = (e) => {
     if (e.candidate) {
-      socket.emit('signal', { to: callerId, data: { type: 'candidate', candidate: e.candidate } });
+      socket.emit('signal', { to: callerId, data: { type: 'candidate', candidate: e.candidate, purpose: 'preview' } });
     }
   };
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  socket.emit('signal', { to: callerId, data: { type: 'offer', sdp: offer } });
+  socket.emit('signal', { to: callerId, data: { type: 'offer', sdp: offer, purpose: 'preview' } });
+}
+
+async function toggleTalkback(callerId, btn) {
+  if (talkbackPCs[callerId]) {
+    talkbackPCs[callerId].close();
+    delete talkbackPCs[callerId];
+    btn.textContent = '🎧 Solo talk';
+    btn.classList.remove('btn-live');
+    return;
+  }
+  try {
+    if (!talkbackStream) {
+      talkbackStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+  } catch (e) {
+    alert('Could not access your microphone for solo talk.');
+    return;
+  }
+  const pc = new RTCPeerConnection(rtcConfig);
+  talkbackPCs[callerId] = pc;
+  talkbackStream.getTracks().forEach((t) => pc.addTrack(t, talkbackStream));
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('signal', { to: callerId, data: { type: 'candidate', candidate: e.candidate, purpose: 'talkback' } });
+    }
+  };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit('signal', { to: callerId, data: { type: 'offer', sdp: offer, purpose: 'talkback' } });
+  btn.textContent = '🔴 Talking...';
+  btn.classList.add('btn-live');
 }
 
 socket.on('signal', async ({ from, data }) => {
-  const pc = previewPCs[from];
+  const purpose = data.purpose || 'preview';
+  const pc = purpose === 'talkback' ? talkbackPCs[from] : previewPCs[from];
   if (!pc) return;
   if (data.type === 'answer') {
     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
@@ -118,6 +160,7 @@ function renderList(list) {
       tiles[id].remove();
       delete tiles[id];
       if (previewPCs[id]) { previewPCs[id].close(); delete previewPCs[id]; }
+      if (talkbackPCs[id]) { talkbackPCs[id].close(); delete talkbackPCs[id]; }
     }
   });
 
@@ -128,9 +171,10 @@ function renderList(list) {
       tile.className = 'tile';
       tile.innerHTML = `
         <div class="tile-name">
-          <span>${escapeHtml(c.name)}</span>
+          <span class="callerNameLabel">${escapeHtml(c.name)}</span>
           <span class="status-pill"><span class="dot"></span><span class="statusText">waiting</span></span>
         </div>
+        <div class="connState subtitle" style="font-size:0.7rem; margin-bottom:6px;">Connecting…</div>
         <video autoplay playsinline></video>
         <div class="noVideoNote" style="font-size:0.75rem; color:var(--muted); margin-top:4px;">No camera - audio only</div>
         <div style="margin-top:8px;">
@@ -149,8 +193,16 @@ function renderList(list) {
           <button class="btn-ghost toggleCamBtn" data-on="true">📷 Cam: On</button>
         </div>
         <div class="tile-actions">
+          <button class="btn-ghost talkBtn">🎧 Solo talk</button>
+          <button class="btn-ghost renameBtn">✏️ Rename</button>
+        </div>
+        <div class="tile-actions">
           <button class="btn-ghost msgBtn">💬 Private message</button>
-          <button class="btn-ghost removeBtn">Remove</button>
+          <button class="btn-ghost linkBtn">🔗 Copy solo link</button>
+        </div>
+        <div class="tile-actions">
+          <button class="btn-ghost hideBtn">🙈 Hide</button>
+          <button class="btn-ghost removeBtn">Hang up</button>
         </div>
       `;
       grid.appendChild(tile);
@@ -187,9 +239,37 @@ function renderList(list) {
           socket.emit('private-message', { callerId: c.id, text: text.trim() });
         }
       };
+
+      tile.querySelector('.talkBtn').onclick = (ev) => toggleTalkback(c.id, ev.target);
+
+      tile.querySelector('.renameBtn').onclick = () => {
+        const newName = prompt('New label for this caller:', tile.querySelector('.callerNameLabel').textContent);
+        if (newName && newName.trim()) {
+          socket.emit('rename-caller', { callerId: c.id, name: newName.trim() });
+        }
+      };
+
+      tile.querySelector('.linkBtn').onclick = (ev) => {
+        const url = location.origin + '/dj.html?only=' + encodeURIComponent(c.id);
+        navigator.clipboard.writeText(url).then(() => {
+          ev.target.textContent = '✅ Copied!';
+          setTimeout(() => { ev.target.textContent = '🔗 Copy solo link'; }, 2000);
+        }).catch(() => {
+          prompt('Copy this link:', url);
+        });
+      };
+
+      tile.querySelector('.hideBtn').onclick = (ev) => {
+        const video = tile.querySelector('video');
+        const isHidden = video.style.visibility === 'hidden';
+        video.style.visibility = isHidden ? 'visible' : 'hidden';
+        ev.target.textContent = isHidden ? '🙈 Hide' : '👁️ Show';
+      };
     }
 
     // update live state UI
+    const nameLabel = tile.querySelector('.callerNameLabel');
+    if (nameLabel.textContent !== c.name) nameLabel.textContent = c.name;
     const dot = tile.querySelector('.dot');
     const statusText = tile.querySelector('.statusText');
     const goLiveBtn = tile.querySelector('.goLiveBtn');
