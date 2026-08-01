@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin - Call In Control</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>🎛️ Call-In Control Panel</h1>
+  <div class="subtitle">Preview waiting callers, then push one live to the DJ screens.</div>
+
+  <div id="grid" class="grid"></div>
+  <div id="emptyMsg" class="empty-msg">No one is waiting yet. Share your caller link to get started.</div>
+
+  <div class="card" style="margin-top:24px;">
+    <div style="font-weight:600; margin-bottom:6px;">Caller link to share:</div>
+    <div id="callerLink" style="color:var(--muted); word-break:break-all; font-size:0.9rem;"></div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+socket.emit('register', { role: 'admin' });
+
+document.getElementById('callerLink').textContent = location.origin + '/caller.html';
+
+const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const previewPCs = {}; // callerId -> RTCPeerConnection
+const tiles = {}; // callerId -> DOM element
+let currentList = [];
+
+async function connectPreview(callerId) {
+  if (previewPCs[callerId]) return;
+  const pc = new RTCPeerConnection(rtcConfig);
+  previewPCs[callerId] = pc;
+
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+  pc.addTransceiver('video', { direction: 'recvonly' });
+
+  pc.ontrack = (e) => {
+    const tile = tiles[callerId];
+    if (!tile) return;
+    const video = tile.querySelector('video');
+    if (video.srcObject !== e.streams[0]) video.srcObject = e.streams[0];
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('signal', { to: callerId, data: { type: 'candidate', candidate: e.candidate } });
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit('signal', { to: callerId, data: { type: 'offer', sdp: offer } });
+}
+
+socket.on('signal', async ({ from, data }) => {
+  const pc = previewPCs[from];
+  if (!pc) return;
+  if (data.type === 'answer') {
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+  } else if (data.type === 'candidate') {
+    try { await pc.addIceCandidate(data.candidate); } catch (e) {}
+  }
+});
+
+function renderList(list) {
+  currentList = list;
+  const grid = document.getElementById('grid');
+  const emptyMsg = document.getElementById('emptyMsg');
+  emptyMsg.style.display = list.length ? 'none' : 'block';
+
+  const currentIds = new Set(list.map((c) => c.id));
+  // Clean up tiles/connections for callers who left
+  Object.keys(tiles).forEach((id) => {
+    if (!currentIds.has(id)) {
+      tiles[id].remove();
+      delete tiles[id];
+      if (previewPCs[id]) { previewPCs[id].close(); delete previewPCs[id]; }
+    }
+  });
+
+  list.forEach((c) => {
+    let tile = tiles[c.id];
+    if (!tile) {
+      tile = document.createElement('div');
+      tile.className = 'tile';
+      tile.innerHTML = `
+        <div class="tile-name">
+          <span>${escapeHtml(c.name)}</span>
+          <span class="status-pill"><span class="dot"></span><span class="statusText">waiting</span></span>
+        </div>
+        <video autoplay playsinline></video>
+        <div class="tile-actions">
+          <button class="btn-live goLiveBtn">Go Live</button>
+          <button class="btn-stop stopBtn" style="display:none;">Stop</button>
+          <button class="btn-ghost removeBtn">Remove</button>
+        </div>
+      `;
+      grid.appendChild(tile);
+      tiles[c.id] = tile;
+      connectPreview(c.id);
+
+      tile.querySelector('.goLiveBtn').onclick = () => socket.emit('go-live', { callerId: c.id });
+      tile.querySelector('.stopBtn').onclick = () => socket.emit('stop-live', { callerId: c.id });
+      tile.querySelector('.removeBtn').onclick = () => socket.emit('remove-caller', { callerId: c.id });
+    }
+
+    // update live state UI
+    const dot = tile.querySelector('.dot');
+    const statusText = tile.querySelector('.statusText');
+    const goLiveBtn = tile.querySelector('.goLiveBtn');
+    const stopBtn = tile.querySelector('.stopBtn');
+    if (c.live) {
+      tile.classList.add('live-tile');
+      dot.classList.add('live');
+      statusText.textContent = 'LIVE';
+      goLiveBtn.style.display = 'none';
+      stopBtn.style.display = 'inline-block';
+    } else {
+      tile.classList.remove('live-tile');
+      dot.classList.remove('live');
+      statusText.textContent = 'waiting';
+      goLiveBtn.style.display = 'inline-block';
+      stopBtn.style.display = 'none';
+    }
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+socket.on('waiting-list', renderList);
+</script>
+</body>
+</html>
