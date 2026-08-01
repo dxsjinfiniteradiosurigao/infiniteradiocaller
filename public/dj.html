@@ -19,7 +19,17 @@
       </div>
       <video id="liveVideo" autoplay playsinline style="display:none;"></video>
       <div class="caller-badge" id="callerBadge" style="display:none;"></div>
+      <div id="audioMeterWrap" style="display:none; position:absolute; bottom:16px; left:16px; right:16px;">
+        <div style="height:8px; background:rgba(255,255,255,0.15); border-radius:4px; overflow:hidden;">
+          <div id="djAudioMeter" style="height:100%; width:0%; background:#2ecc71; transition:width 0.1s;"></div>
+        </div>
+      </div>
     </div>
+  </div>
+
+  <div id="unlockOverlay" class="card" style="text-align:center; margin-top:20px;">
+    <div style="margin-bottom:10px;">🔊 Click below once so this tab is allowed to play caller audio.</div>
+    <button class="btn-primary" id="unlockBtn">Enable Audio for This Screen</button>
   </div>
 </div>
 
@@ -31,6 +41,37 @@ socket.emit('register', { role: 'dj' });
 const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 let currentPC = null;
 let currentCallerId = null;
+let audioUnlocked = false;
+
+document.getElementById('unlockBtn').onclick = () => {
+  audioUnlocked = true;
+  const video = document.getElementById('liveVideo');
+  video.muted = false;
+  video.play().catch(() => {});
+  document.getElementById('unlockOverlay').style.display = 'none';
+};
+
+function setupDjMeter(stream) {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    document.getElementById('audioMeterWrap').style.display = 'block';
+    function tick() {
+      if (stream !== currentStream) return; // stop when call ends/changes
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a, b) => a + b, 0) / data.length;
+      document.getElementById('djAudioMeter').style.width = Math.min(100, avg * 1.5) + '%';
+      requestAnimationFrame(tick);
+    }
+    tick();
+  } catch (e) { /* ignore */ }
+}
+
+let currentStream = null;
 
 async function connectToCaller(callerId, name) {
   cleanupCurrent();
@@ -44,11 +85,16 @@ async function connectToCaller(callerId, name) {
 
   pc.ontrack = (e) => {
     const video = document.getElementById('liveVideo');
-    video.srcObject = e.streams[0];
+    const stream = e.streams[0];
+    currentStream = stream;
+    video.srcObject = stream;
+    video.muted = !audioUnlocked;
     video.style.display = 'block';
+    video.play().catch(() => {});
     document.getElementById('waitingScreen').style.display = 'none';
     document.getElementById('callerBadge').style.display = 'block';
     document.getElementById('callerBadge').textContent = '🔴 ' + name;
+    if (stream.getAudioTracks().length) setupDjMeter(stream);
   };
 
   pc.onicecandidate = (e) => {
@@ -65,10 +111,12 @@ async function connectToCaller(callerId, name) {
 function cleanupCurrent() {
   if (currentPC) { currentPC.close(); currentPC = null; }
   currentCallerId = null;
+  currentStream = null;
   const video = document.getElementById('liveVideo');
   video.srcObject = null;
   video.style.display = 'none';
   document.getElementById('callerBadge').style.display = 'none';
+  document.getElementById('audioMeterWrap').style.display = 'none';
   document.getElementById('waitingScreen').style.display = 'block';
 }
 
