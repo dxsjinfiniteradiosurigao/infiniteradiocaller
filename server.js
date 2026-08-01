@@ -71,6 +71,23 @@ io.on('connection', (socket) => {
     broadcastWaitingList();
   });
 
+  // Admin sends a message to everyone waiting/live
+  socket.on('broadcast-message', ({ text }) => {
+    Object.keys(callers).forEach((id) => io.to(id).emit('host-message', { text }));
+  });
+
+  // Admin sends a private message to one caller
+  socket.on('private-message', ({ callerId, text }) => {
+    if (!callers[callerId]) return;
+    io.to(callerId).emit('host-message', { text, private: true });
+  });
+
+  // Admin remotely mutes/unmutes a caller's mic or camera
+  socket.on('set-caller-media', ({ callerId, audio, video }) => {
+    if (!callers[callerId]) return;
+    io.to(callerId).emit('media-control', { audio, video });
+  });
+
   socket.on('disconnect', () => {
     if (socket.data.role === 'caller') {
       const wasLive = callers[socket.id] && callers[socket.id].live;
