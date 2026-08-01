@@ -88,6 +88,13 @@ io.on('connection', (socket) => {
     io.to(callerId).emit('media-control', { audio, video });
   });
 
+  // Admin renames/labels a caller
+  socket.on('rename-caller', ({ callerId, name }) => {
+    if (!callers[callerId] || !name) return;
+    callers[callerId].name = name;
+    broadcastWaitingList();
+  });
+
   socket.on('disconnect', () => {
     if (socket.data.role === 'caller') {
       const wasLive = callers[socket.id] && callers[socket.id].live;
