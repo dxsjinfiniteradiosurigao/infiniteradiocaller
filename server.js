@@ -9,6 +9,27 @@ const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Fetches short-lived TURN credentials from Metered.ca using server-side
+// secrets (set as environment variables on Render - never exposed to the
+// browser). Falls back to an empty list if not configured; the client then
+// falls back to the public demo TURN relay.
+app.get('/api/turn-credentials', async (req, res) => {
+  const apiKey = process.env.METERED_API_KEY;
+  const subdomain = process.env.METERED_SUBDOMAIN;
+  if (!apiKey || !subdomain) {
+    return res.json({ iceServers: [] });
+  }
+  try {
+    const url = `https://${subdomain}.metered.live/api/v1/turn/credentials?apiKey=${encodeURIComponent(apiKey)}`;
+    const r = await fetch(url);
+    const data = await r.json();
+    res.json({ iceServers: Array.isArray(data) ? data : [] });
+  } catch (e) {
+    console.error('TURN credential fetch failed:', e.message);
+    res.json({ iceServers: [] });
+  }
+});
+
 // ---- In-memory state (resets if server restarts - fine for a live show) ----
 const callers = {};      // socketId -> { name, live }
 const admins = new Set();
