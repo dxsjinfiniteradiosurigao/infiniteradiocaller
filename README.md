@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/30617816/README.md)
+[README.md](https://github.com/user-attachments/files/30617886/README.md)
 # Radio Call-In System (Free)
 
 Lets your Facebook/TikTok/YouTube viewers "call in" to your show from their
@@ -76,7 +76,35 @@ PC and the tunnel are running.
 - Video is optional for callers (checkbox on the join page) — audio-only
   keeps bandwidth low, which matters most when you might have several
   callers waiting at once.
-- If some callers behind strict mobile-carrier NATs fail to connect (rare,
-  but possible), the fix is adding a free TURN server, e.g. a free account
-  at https://www.metered.ca/tools/openrelay/ — happy to wire that in if you
-  hit that issue.
+
+## Fixing "Failed - check network" (important!)
+
+If a caller's tile shows a black screen with "Failed - check network,"
+their connection couldn't get through their mobile network's NAT and the
+free shared TURN relay this app falls back to is often overloaded or
+blocked (it's a public demo used by many tutorials, not reliable for
+regular use).
+
+**Fix: get your own free dedicated TURN server (5 minutes, no coding).**
+
+1. Go to https://www.metered.ca/tools/openrelay/ and sign up for a free
+   account (the free plan includes 50GB/month, plenty for call-in use).
+2. After signing up, go to your Metered dashboard. You'll see:
+   - Your **subdomain** (e.g. `myradiostation` — shown in your app's URL
+     like `myradiostation.metered.live`)
+   - Your **API Key** (a long string, in the API/Secret Key section)
+3. Go to your Render dashboard → your web service → **Environment** tab.
+4. Add two environment variables:
+   - Key: `METERED_SUBDOMAIN` → Value: your subdomain (just the name part,
+     not the full URL)
+   - Key: `METERED_API_KEY` → Value: your API key
+5. Click **Save Changes** — Render will automatically redeploy.
+6. That's it. No file editing needed. The app automatically detects these
+   and switches to your dedicated TURN server instead of the shared
+   fallback one.
+
+You can verify it worked by opening the admin page, pressing F12 (or
+right-click → Inspect) to open your browser's developer console, and
+looking at the **Console** tab — you should see "Using your own dedicated
+TURN servers" instead of the fallback message.
+
