@@ -83,15 +83,35 @@ app.get('/api/turn-credentials', async (req, res) => {
 });
 
 // ---- In-memory state (resets if server restarts - fine for a live show) ----
-const callers = {};      // socketId -> { name, live }
+const callers = {};      // socketId -> { name, live, chat: [], audio, video }
 const admins = new Set();
 const djs = new Set();
+const vmixViewers = new Set();
+
+let settings = {
+  welcomeMessage: '',       // shown to every caller as soon as they join
+  autoMuteOnJoin: false     // if true, new callers start muted (host must unmute)
+};
 
 function broadcastWaitingList() {
   const list = Object.entries(callers).map(([id, c]) => ({
-    id, name: c.name, live: c.live
+    id, name: c.name, live: c.live, audio: c.audio, video: c.video, chat: c.chat
   }));
   admins.forEach((a) => io.to(a).emit('waiting-list', list));
+}
+
+function currentLiveCallerId() {
+  return Object.keys(callers).find((id) => callers[id].live) || null;
+}
+
+function broadcastVmixState() {
+  const liveId = currentLiveCallerId();
+  vmixViewers.forEach((v) =>
+    io.to(v).emit('vmix-state', {
+      liveId,
+      name: liveId ? callers[liveId].name : null
+    })
+  );
 }
 
 io.on('connection', (socket) => {
@@ -100,14 +120,55 @@ io.on('connection', (socket) => {
     socket.data.name = name || 'Caller';
 
     if (role === 'caller') {
-      callers[socket.id] = { name: socket.data.name, live: false };
+      callers[socket.id] = {
+        name: socket.data.name,
+        live: false,
+        chat: [],
+        audio: !settings.autoMuteOnJoin,
+        video: true
+      };
+      if (settings.autoMuteOnJoin) {
+        socket.emit('media-control', { audio: false });
+      }
+      if (settings.welcomeMessage) {
+        socket.emit('host-message', { text: settings.welcomeMessage, private: false });
+      }
       broadcastWaitingList();
     } else if (role === 'admin') {
       admins.add(socket.id);
+      socket.emit('settings-state', settings);
       broadcastWaitingList();
     } else if (role === 'dj') {
       djs.add(socket.id);
+    } else if (role === 'vmix') {
+      vmixViewers.add(socket.id);
+      broadcastVmixState();
     }
+  });
+
+  // Admin updates global settings (welcome message, auto-mute default)
+  socket.on('update-settings', (partial) => {
+    settings = { ...settings, ...partial };
+    admins.forEach((a) => io.to(a).emit('settings-state', settings));
+  });
+
+  // Admin mutes every waiting/live caller's mic in one click
+  socket.on('mute-all', () => {
+    Object.keys(callers).forEach((id) => {
+      callers[id].audio = false;
+      io.to(id).emit('media-control', { audio: false });
+    });
+    broadcastWaitingList();
+  });
+
+  // Two-way text chat between admin and a specific caller
+  socket.on('chat-message', ({ callerId, text, from }) => {
+    if (!callers[callerId] || !text || !text.trim()) return;
+    const msg = { from, text: text.trim(), ts: Date.now() };
+    callers[callerId].chat.push(msg);
+    if (callers[callerId].chat.length > 100) callers[callerId].chat.shift();
+    io.to(callerId).emit('chat-message', msg);
+    admins.forEach((a) => io.to(a).emit('chat-message', { callerId, ...msg }));
   });
 
   // Generic WebRTC signaling relay (offers, answers, ICE candidates)
@@ -125,6 +186,7 @@ io.on('connection', (socket) => {
       io.to(djId).emit('incoming-call', { callerId, name: callers[callerId].name })
     );
     broadcastWaitingList();
+    broadcastVmixState();
   });
 
   // Admin stops a live caller
@@ -135,6 +197,7 @@ io.on('connection', (socket) => {
     io.to(callerId).emit('stop-broadcast', { djIds });
     djIds.forEach((djId) => io.to(djId).emit('call-ended', { callerId }));
     broadcastWaitingList();
+    broadcastVmixState();
   });
 
   // Admin removes/kicks a waiting caller
@@ -158,7 +221,10 @@ io.on('connection', (socket) => {
   // Admin remotely mutes/unmutes a caller's mic or camera
   socket.on('set-caller-media', ({ callerId, audio, video }) => {
     if (!callers[callerId]) return;
+    if (typeof audio === 'boolean') callers[callerId].audio = audio;
+    if (typeof video === 'boolean') callers[callerId].video = video;
     io.to(callerId).emit('media-control', { audio, video });
+    broadcastWaitingList();
   });
 
   // Admin renames/labels a caller
@@ -180,6 +246,8 @@ io.on('connection', (socket) => {
       admins.delete(socket.id);
     } else if (socket.data.role === 'dj') {
       djs.delete(socket.id);
+    } else if (socket.data.role === 'vmix') {
+      vmixViewers.delete(socket.id);
     }
   });
 });
