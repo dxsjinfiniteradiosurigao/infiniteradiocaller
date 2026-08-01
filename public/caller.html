@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Call In - 93.3 Infinite Radio Surigao</title>
+<title>Call In — 93.3 Infinite Radio Surigao</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -15,21 +15,19 @@
     <input type="text" id="nameInput" placeholder="Your name" maxlength="30" />
     <label class="check">
       <input type="checkbox" id="videoToggle" />
-      Enable camera (optional - audio only works fine)
+      Enable camera (optional — audio only works fine)
     </label>
-    <button class="btn-primary" id="joinBtn" style="width:100%; margin-top:10px;">Join Waiting Room</button>
-    <div id="errMsg" style="color:#ff8080; margin-top:10px; font-size:0.85rem;"></div>
+    <button class="btn-primary" id="joinBtn" style="width:100%; margin-top:10px;">Join waiting room</button>
+    <div id="errMsg" style="color:var(--brand-red-soft); margin-top:10px; font-size:0.85rem;"></div>
   </div>
 
   <div class="card" id="waitCard" style="display:none; text-align:center;">
     <div class="pulse"></div>
-    <div id="waitStatus" style="font-weight:600;">You're in the waiting room...</div>
+    <div id="waitStatus" style="font-weight:700; font-family:var(--font-display);">You're in the waiting room...</div>
     <div class="subtitle" style="margin-top:6px;">Stay on this page. You'll go live automatically when selected.</div>
     <video id="selfPreview" autoplay muted playsinline style="width:100%; border-radius:8px; margin-top:14px; display:none;"></video>
     <div id="micLevelWrap" style="margin-top:14px;">
-      <div style="height:8px; background:#2a2e38; border-radius:4px; overflow:hidden;">
-        <div id="micLevel" style="height:100%; width:0%; background:#2ecc71; transition:width 0.1s;"></div>
-      </div>
+      <div class="meter-track"><div id="micLevel" class="meter-fill"></div></div>
       <div class="subtitle" style="margin-top:6px;">Mic level</div>
     </div>
     <div id="mediaStatus" style="margin-top:10px; font-size:0.85rem; color:var(--muted);"></div>
@@ -38,7 +36,16 @@
 
   <div id="messageBanner" style="display:none; margin-top:16px;" class="card">
     <div id="messageLabel" style="font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Message from host</div>
-    <div id="messageText" style="font-weight:600;"></div>
+    <div id="messageText" style="font-weight:700;"></div>
+  </div>
+
+  <div id="chatCard" class="card" style="display:none; margin-top:16px;">
+    <div class="card-title"><span class="icon">💬</span> Chat with the studio</div>
+    <div id="chatLog" class="chat-log" style="max-height:220px;"></div>
+    <div class="chat-input-row">
+      <input type="text" id="chatInput" placeholder="Type a message…" />
+      <button class="btn-primary" id="chatSendBtn">Send</button>
+    </div>
   </div>
 </div>
 
@@ -71,6 +78,7 @@ document.getElementById('joinBtn').onclick = async () => {
 
   document.getElementById('joinCard').style.display = 'none';
   document.getElementById('waitCard').style.display = 'block';
+  document.getElementById('chatCard').style.display = 'block';
 
   if (wantVideo) {
     const preview = document.getElementById('selfPreview');
@@ -112,7 +120,7 @@ async function getOrCreatePC(remoteId, purpose) {
   }
 
   if (purpose === 'talkback') {
-    // Admin is whispering privately to this caller - play it through an audio element.
+    // Admin is whispering privately to this caller only — never sent to DJs.
     pc.ontrack = (e) => {
       let audioEl = document.getElementById('talkbackAudio');
       if (!audioEl) {
@@ -140,7 +148,6 @@ async function getOrCreatePC(remoteId, purpose) {
   return pc;
 }
 
-// Any admin (for preview), DJ (when live), or admin-talkback sends us an offer.
 socket.on('signal', async ({ from, data }) => {
   const purpose = data.purpose || 'main';
   const pc = await getOrCreatePC(from, purpose);
@@ -199,6 +206,31 @@ socket.on('media-control', ({ audio, video }) => {
   }
   statusEl.textContent = parts.join(' · ');
 });
+
+// ---- Chat with the studio ----
+function appendChatMsg(from, text) {
+  const log = document.getElementById('chatLog');
+  const empty = log.querySelector('.chat-empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.className = 'chat-msg from-' + from;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+socket.on('chat-message', ({ from, text }) => appendChatMsg(from, text));
+
+function sendChat() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+  socket.emit('chat-message', { callerId: socket.id, text, from: 'caller' });
+  appendChatMsg('caller', text);
+  input.value = '';
+}
+document.getElementById('chatSendBtn').onclick = sendChat;
+document.getElementById('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
 </script>
 </body>
 </html>
