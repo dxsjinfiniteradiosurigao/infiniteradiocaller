@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vMix Output</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="vmix-body">
+<div class="vmix-stage" id="stage">
+  <video id="liveVideo" autoplay playsinline muted style="display:none;"></video>
+  <div class="vmix-lower-third" id="lowerThird" style="display:none;">
+    <span class="on-air">ON AIR</span>
+    <span id="callerNameOut"></span>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/rtc-config.js"></script>
+<script>
+// Clean, chrome-free output for capturing in vMix/OBS as a browser source.
+// Shows only whichever caller is currently live, with the caller's own
+// audio+video track — never the admin's line-in/mic. Add this URL as a
+// Web Browser input in vMix (e.g. 640x360 up to full HD, transparent bg
+// optional if your vMix layer supports it).
+const socket = io();
+socket.emit('register', { role: 'vmix' });
+
+let resolvedRtcConfig = null;
+RTC_CONFIG_PROMISE.then((cfg) => { resolvedRtcConfig = cfg; });
+async function getRtc() { if (!resolvedRtcConfig) resolvedRtcConfig = await RTC_CONFIG_PROMISE; return resolvedRtcConfig; }
+
+let currentPC = null;
+let currentCallerId = null;
+
+async function connectToCaller(callerId, name) {
+  cleanupCurrent();
+  currentCallerId = callerId;
+
+  const pc = new RTCPeerConnection(await getRtc());
+  currentPC = pc;
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+  pc.addTransceiver('video', { direction: 'recvonly' });
+
+  pc.ontrack = (e) => {
+    const video = document.getElementById('liveVideo');
+    video.srcObject = e.streams[0];
+    video.style.display = 'block';
+    video.play().catch(() => {});
+    document.getElementById('callerNameOut').textContent = name;
+    document.getElementById('lowerThird').style.display = 'flex';
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('signal', { to: callerId, data: { type: 'candidate', candidate: e.candidate } });
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit('signal', { to: callerId, data: { type: 'offer', sdp: offer } });
+}
+
+function cleanupCurrent() {
+  if (currentPC) { currentPC.close(); currentPC = null; }
+  currentCallerId = null;
+  const video = document.getElementById('liveVideo');
+  video.srcObject = null;
+  video.style.display = 'none';
+  document.getElementById('lowerThird').style.display = 'none';
+}
+
+socket.on('signal', async ({ from, data }) => {
+  if (!currentPC || from !== currentCallerId) return;
+  if (data.type === 'answer') {
+    await currentPC.setRemoteDescription(new RTCSessionDescription(data.sdp));
+  } else if (data.type === 'candidate') {
+    try { await currentPC.addIceCandidate(data.candidate); } catch (e) {}
+  }
+});
+
+// Server tells us who's currently live (fires on go-live/stop-live and on
+// initial connect in case a caller is already on air).
+socket.on('vmix-state', ({ liveId, name }) => {
+  if (liveId && liveId !== currentCallerId) {
+    connectToCaller(liveId, name);
+  } else if (!liveId && currentCallerId) {
+    cleanupCurrent();
+  }
+});
+</script>
+</body>
+</html>
