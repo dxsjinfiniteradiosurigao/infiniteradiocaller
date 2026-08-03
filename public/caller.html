@@ -11,12 +11,44 @@
   <h1>📻 Call In to the Show</h1>
   <div class="subtitle">Enter your name and join the waiting room. The tech team will bring you on air.</div>
 
-  <div class="card" id="joinCard">
-    <input type="text" id="nameInput" placeholder="Your name" maxlength="30" />
+  <!-- Step 0: shown only if opened inside Facebook/Messenger/Instagram/TikTok's built-in browser -->
+  <div class="card" id="inAppGateCard" style="display:none;">
+    <div class="card-title"><span class="icon">⚠️</span> Open this in your regular browser</div>
+    <div class="subtitle" style="margin-bottom:14px;">
+      Microphone and camera access is usually blocked inside the Facebook/Messenger/TikTok/Instagram app browser.
+      Please open this link in Chrome, Safari, or your phone's default browser instead.
+    </div>
+    <button class="btn-primary" id="tryOpenExternalBtn" style="width:100%;">Try opening in external browser</button>
+    <div class="subtitle" style="margin-top:14px; font-size:0.82rem;">
+      If that doesn't work: tap the <strong>⋯</strong> or <strong>Share</strong> icon in the top-right of this
+      app's browser bar, then choose <strong>"Open in Chrome"</strong> (Android) or
+      <strong>"Open in Safari"</strong> (iPhone).
+    </div>
+    <button class="btn-ghost" id="continueAnywayBtn" style="width:100%; margin-top:14px;">Continue here anyway</button>
+  </div>
+
+  <!-- Step 1: must grant mic/camera before the name form appears -->
+  <div class="card" id="permCard" style="display:none;">
+    <div class="card-title"><span class="icon">🎙️</span> Turn on your microphone</div>
+    <div class="subtitle" style="margin-bottom:14px;">
+      We need microphone access before you can join — camera is optional and up to you below.
+    </div>
     <label class="check">
-      <input type="checkbox" id="videoToggle" />
-      Enable camera (optional — audio only works fine)
+      <input type="checkbox" id="videoToggle" checked>
+      Also enable my camera
     </label>
+    <button class="btn-primary" id="grantBtn" style="width:100%; margin-top:6px;">Enable microphone &amp; continue</button>
+    <div id="permErrMsg" style="color:var(--brand-red-soft); margin-top:10px; font-size:0.85rem;"></div>
+    <div class="subtitle" style="margin-top:12px; font-size:0.8rem;">
+      Tip: if possible, use earphones/a headset — it avoids echo on air.
+    </div>
+  </div>
+
+  <!-- Step 2: name + join, only reachable after permission is granted -->
+  <div class="card" id="joinCard" style="display:none;">
+    <video id="selfPreviewJoin" autoplay muted playsinline style="width:100%; border-radius:8px; margin-bottom:12px; display:none;"></video>
+    <div class="status-pill" style="margin-bottom:12px;"><span class="dot on"></span> Mic ready</div>
+    <input type="text" id="nameInput" placeholder="Your name" maxlength="30" />
     <button class="btn-primary" id="joinBtn" style="width:100%; margin-top:10px;">Join waiting room</button>
     <div id="errMsg" style="color:var(--brand-red-soft); margin-top:10px; font-size:0.85rem;"></div>
   </div>
@@ -58,13 +90,46 @@ const peerConnections = {}; // remoteId -> RTCPeerConnection
 let rtcConfig = null;
 RTC_CONFIG_PROMISE.then((cfg) => { rtcConfig = cfg; });
 
-document.getElementById('joinBtn').onclick = async () => {
-  const name = document.getElementById('nameInput').value.trim();
-  const wantVideo = document.getElementById('videoToggle').checked;
-  const errMsg = document.getElementById('errMsg');
-  errMsg.textContent = '';
+// ---- Step 0: detect Facebook/Messenger/Instagram/TikTok in-app browsers ----
+// These embedded webviews commonly block getUserMedia (mic/camera), which is
+// the #1 cause of callers failing to join from a link shared on social media.
+function isInAppBrowser() {
+  const ua = navigator.userAgent || '';
+  return /FBAN|FBAV|FB_IAB|Instagram|Messenger|MessengerLiteForiOS|Line\/|TikTok|musical_ly|BytedanceWebview/i.test(ua);
+}
 
-  if (!name) { errMsg.textContent = 'Please enter your name.'; return; }
+function tryOpenExternal() {
+  const url = location.href;
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  if (isAndroid) {
+    // Android intent trick: asks the OS to hand this URL to Chrome directly.
+    const stripped = url.replace(/^https?:\/\//, '');
+    location.href = 'intent://' + stripped + '#Intent;scheme=https;package=com.android.chrome;end';
+  } else {
+    // iOS in-app browsers don't allow a reliable programmatic redirect out —
+    // guide the person to the share/menu button instead (shown in the card).
+    alert('On iPhone, tap the ⋯ or Share icon at the top of this screen, then choose "Open in Safari".');
+  }
+}
+
+function showJoinFlow() {
+  document.getElementById('inAppGateCard').style.display = 'none';
+  document.getElementById('permCard').style.display = 'block';
+}
+
+if (isInAppBrowser()) {
+  document.getElementById('inAppGateCard').style.display = 'block';
+} else {
+  showJoinFlow();
+}
+document.getElementById('tryOpenExternalBtn').onclick = tryOpenExternal;
+document.getElementById('continueAnywayBtn').onclick = showJoinFlow;
+
+// ---- Step 1: request mic/camera before showing the name form ----
+document.getElementById('grantBtn').onclick = async () => {
+  const wantVideo = document.getElementById('videoToggle').checked;
+  const errMsg = document.getElementById('permErrMsg');
+  errMsg.textContent = '';
 
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
@@ -72,15 +137,35 @@ document.getElementById('joinBtn').onclick = async () => {
       video: wantVideo ? { width: 320, height: 240 } : false
     });
   } catch (e) {
-    errMsg.textContent = 'Could not access microphone/camera. Please allow permission and try again.';
+    errMsg.textContent = 'Microphone access was blocked or unavailable. Please allow permission in your browser settings and try again.';
     return;
   }
+
+  document.getElementById('permCard').style.display = 'none';
+  document.getElementById('joinCard').style.display = 'block';
+
+  if (wantVideo) {
+    const preview = document.getElementById('selfPreviewJoin');
+    preview.style.display = 'block';
+    preview.srcObject = localStream;
+  }
+};
+
+// ---- Step 2: name + join (mic/camera already granted by this point) ----
+document.getElementById('joinBtn').onclick = () => {
+  const name = document.getElementById('nameInput').value.trim();
+  const errMsg = document.getElementById('errMsg');
+  errMsg.textContent = '';
+
+  if (!name) { errMsg.textContent = 'Please enter your name.'; return; }
+  if (!localStream) { errMsg.textContent = 'Microphone access is required — please refresh and try again.'; return; }
 
   document.getElementById('joinCard').style.display = 'none';
   document.getElementById('waitCard').style.display = 'block';
   document.getElementById('chatCard').style.display = 'block';
 
-  if (wantVideo) {
+  const hasVideo = localStream.getVideoTracks().length > 0;
+  if (hasVideo) {
     const preview = document.getElementById('selfPreview');
     preview.style.display = 'block';
     preview.srcObject = localStream;
