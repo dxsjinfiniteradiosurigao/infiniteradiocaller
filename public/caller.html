@@ -47,7 +47,15 @@
 
   <!-- Step 2: name + join, only reachable after permission is granted -->
   <div class="card" id="joinCard" style="display:none;">
-    <video id="selfPreviewJoin" autoplay muted playsinline style="width:100%; border-radius:8px; margin-bottom:12px; display:none;"></video>
+    <video id="selfPreviewJoin" autoplay muted playsinline style="width:100%; border-radius:8px; margin-bottom:10px; display:none;"></video>
+    <div id="orientToggleWrap" style="display:none; margin-bottom:12px;">
+      <div class="subtitle" style="margin-bottom:6px;">Camera orientation</div>
+      <div style="display:flex; gap:6px;">
+        <button type="button" class="btn-ghost orientBtn" data-mode="auto" style="flex:1;">🔄 Auto</button>
+        <button type="button" class="btn-ghost orientBtn" data-mode="portrait" style="flex:1;">📱 Portrait</button>
+        <button type="button" class="btn-ghost orientBtn" data-mode="landscape" style="flex:1;">🖥️ Landscape</button>
+      </div>
+    </div>
     <div class="status-pill" style="margin-bottom:12px;"><span class="dot on"></span> Mic ready</div>
     <input type="text" id="nameInput" placeholder="Your name" maxlength="30" />
     <button class="btn-primary" id="joinBtn" style="width:100%; margin-top:10px;">Join waiting room</button>
@@ -66,6 +74,14 @@
     <div id="mediaStatus" style="margin-top:10px; font-size:0.85rem; color:var(--muted);"></div>
     <div id="connStatusLine" style="margin-top:4px; font-size:0.75rem; color:var(--muted);"></div>
     <div id="programStatusLine" style="margin-top:4px; font-size:0.75rem; color:var(--muted);">🔊 Live audio: connecting…</div>
+    <div id="speakerToggleWrap" style="margin-top:12px; display:none;">
+      <div class="subtitle" style="margin-bottom:6px;">Playback route</div>
+      <div style="display:flex; gap:6px;">
+        <button type="button" class="btn-ghost speakerBtn" data-route="speaker" style="flex:1;">🔊 Loudspeaker</button>
+        <button type="button" class="btn-ghost speakerBtn" data-route="earpiece" style="flex:1;">📱 Earpiece</button>
+      </div>
+      <div id="speakerMsg" class="subtitle" style="margin-top:6px; font-size:0.72rem;"></div>
+    </div>
     <div id="talkbackBanner" style="display:none; margin-top:10px;" class="status-pill">
       <span class="dot on"></span> 🎙️ Studio is talking to you
     </div>
@@ -187,8 +203,51 @@ document.getElementById('grantBtn').onclick = async () => {
     const preview = document.getElementById('selfPreviewJoin');
     preview.style.display = 'block';
     preview.srcObject = localStream;
+    document.getElementById('orientToggleWrap').style.display = 'block';
+    applyOrientation(orientationMode);
   }
 };
+
+// ---- Orientation handling ----
+// Fixes the "portrait looks zoomed" problem: the old code always asked for a
+// fixed 320x240 (landscape) frame no matter how the phone was held, so in
+// portrait the browser had to crop/zoom a landscape frame into a portrait
+// video element. Instead we ask the camera itself for an aspect ratio that
+// matches how the phone is actually being held, via applyConstraints on the
+// live track (no need to re-grant permission or re-negotiate).
+let orientationMode = 'auto'; // 'auto' | 'portrait' | 'landscape'
+
+function isPhysicallyPortrait() {
+  return window.matchMedia('(orientation: portrait)').matches;
+}
+
+async function applyOrientation(mode) {
+  orientationMode = mode;
+  document.querySelectorAll('.orientBtn').forEach((b) => {
+    b.classList.toggle('btn-primary', b.dataset.mode === mode);
+    b.classList.toggle('btn-ghost', b.dataset.mode !== mode);
+  });
+  if (!localStream) return;
+  const track = localStream.getVideoTracks()[0];
+  if (!track) return;
+  const portrait = mode === 'auto' ? isPhysicallyPortrait() : mode === 'portrait';
+  const constraints = portrait
+    ? { aspectRatio: { ideal: 0.75 }, width: { ideal: 480 }, height: { ideal: 640 } }
+    : { aspectRatio: { ideal: 1.3333 }, width: { ideal: 640 }, height: { ideal: 480 } };
+  try {
+    await track.applyConstraints(constraints);
+  } catch (e) {
+    console.warn('Could not apply orientation constraints:', e);
+  }
+}
+
+document.querySelectorAll('.orientBtn').forEach((btn) => {
+  btn.onclick = () => applyOrientation(btn.dataset.mode);
+});
+
+window.matchMedia('(orientation: portrait)').addEventListener('change', () => {
+  if (orientationMode === 'auto') applyOrientation('auto');
+});
 
 // ---- Step 2: name + join (mic/camera already granted by this point) ----
 
@@ -246,8 +305,54 @@ document.getElementById('joinBtn').onclick = () => {
   sharedAudioCtx.resume().catch(() => {});
 
   setupMicMeter(localStream);
+  setupSpeakerToggle();
   socket.emit('register', { role: 'caller', name });
 };
+
+// ---- Speaker route toggle (loudspeaker vs earpiece) ----
+// Honest limitation up front: setSinkId() to pick an output device only
+// works in some Chromium-based Android browsers, and there's no earpiece
+// route exposed on iOS Safari at all from a web page - the OS doesn't give
+// pages that control. Where it's not supported we say so instead of
+// pretending the button did something.
+function setupSpeakerToggle() {
+  const wrap = document.getElementById('speakerToggleWrap');
+  const msg = document.getElementById('speakerMsg');
+  wrap.style.display = 'block';
+
+  const supported = typeof HTMLMediaElement !== 'undefined' && !!HTMLMediaElement.prototype.setSinkId;
+  const ctxSupported = typeof AudioContext !== 'undefined' && !!AudioContext.prototype.setSinkId;
+  if (!supported && !ctxSupported) {
+    msg.textContent = 'Your browser doesn\u2019t let a webpage switch this — use your phone\u2019s own volume/Bluetooth controls.';
+    return;
+  }
+
+  async function applyRoute(route) {
+    document.querySelectorAll('.speakerBtn').forEach((b) => {
+      b.classList.toggle('btn-primary', b.dataset.route === route);
+      b.classList.toggle('btn-ghost', b.dataset.route !== route);
+    });
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outputs = devices.filter((d) => d.kind === 'audiooutput');
+      const match = outputs.find((d) => new RegExp(route === 'earpiece' ? 'ear' : 'speaker', 'i').test(d.label));
+      const sinkId = match ? match.deviceId : (route === 'speaker' ? 'default' : null);
+      if (!sinkId) { msg.textContent = 'Couldn\u2019t find an earpiece output on this device.'; return; }
+      // This is the actual path most talkback/program audio plays through.
+      if (ctxSupported && sharedAudioCtx) await sharedAudioCtx.setSinkId(sinkId);
+      // Kept in sync too, in case the muted backup <audio> element ever becomes the active path.
+      if (supported) await document.getElementById('talkbackAudio').setSinkId(sinkId);
+      msg.textContent = 'Routed to ' + (route === 'earpiece' ? 'earpiece' : 'loudspeaker') + '.';
+    } catch (e) {
+      msg.textContent = 'Could not switch output: ' + e.message;
+    }
+  }
+
+  document.querySelectorAll('.speakerBtn').forEach((btn) => {
+    btn.onclick = () => applyRoute(btn.dataset.route);
+  });
+  applyRoute('speaker');
+}
 
 function setupMicMeter(stream) {
   try {
