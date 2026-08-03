@@ -54,6 +54,13 @@
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-title"><span class="icon">🔊</span> DJ audio output</div>
+    <div class="subtitle" style="margin-bottom:10px;">If a DJ forgets to switch their own screen's output, switch it for them here.</div>
+    <div id="djOutputList"></div>
+    <div id="djOutputEmpty" class="subtitle" style="font-size:0.85rem;">No DJ screens connected yet.</div>
+  </div>
+
   <div id="grid" class="grid" style="margin-top:20px;"></div>
   <div id="emptyMsg" class="empty-msg">No one is waiting yet. Share your caller link to get started.</div>
 
@@ -107,6 +114,38 @@ document.getElementById('muteAllBtn').onclick = () => {
     socket.emit('mute-all');
   }
 };
+
+// ---- DJ audio output remote control ----
+socket.on('dj-info', (list) => {
+  const wrap = document.getElementById('djOutputList');
+  const empty = document.getElementById('djOutputEmpty');
+  empty.style.display = list.length ? 'none' : 'block';
+  wrap.innerHTML = '';
+  list.forEach((dj) => {
+    const row = document.createElement('div');
+    row.className = 'settings-row';
+    const select = document.createElement('select');
+    select.style.cssText = 'padding:8px 10px; border-radius:9px; border:1px solid var(--border); background:var(--panel-3); color:var(--text); font-size:0.85rem; min-width:200px;';
+    if (!dj.devices || !dj.devices.length) {
+      select.innerHTML = '<option value="">No devices reported yet</option>';
+    } else {
+      dj.devices.forEach((d) => {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = d.label;
+        if (d.deviceId === dj.currentDeviceId) opt.selected = true;
+        select.appendChild(opt);
+      });
+    }
+    select.onchange = () => socket.emit('set-dj-output', { djId: dj.id, deviceId: select.value });
+    const label = document.createElement('div');
+    label.className = 'settings-label';
+    label.textContent = dj.label;
+    row.appendChild(label);
+    row.appendChild(select);
+    wrap.appendChild(row);
+  });
+});
 
 function setupMeter(stream, meterEl) {
   try {
