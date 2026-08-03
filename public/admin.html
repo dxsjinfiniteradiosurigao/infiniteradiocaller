@@ -61,6 +61,10 @@
       <option value="">Loading microphones…</option>
     </select>
     <div id="talkbackInputMsg" class="subtitle" style="margin-top:8px; font-size:0.78rem;"></div>
+    <div style="margin-top:10px;">
+      <div class="meter-track"><div id="lineInMeter" class="meter-fill"></div></div>
+      <div class="subtitle" style="margin-top:4px; font-size:0.7rem;" id="lineInMeterLabel">Not capturing yet — select an input above or click "Solo talk" once to start.</div>
+    </div>
   </div>
 
   <div class="card">
@@ -103,8 +107,35 @@ const talkbackPCs = {}; // callerId -> RTCPeerConnection (solo talk)
 const programPCs = {}; // callerId -> RTCPeerConnection (continuous Line In feed, sent to every waiting caller automatically)
 let talkbackStream = null;
 let talkbackStreamPromise = null; // in-flight getUserMedia, so simultaneous callers don't each trigger their own permission/capture
+let lineInMeterToken = 0; // bumped whenever the captured stream changes, so the old meter loop knows to stop
 const tiles = {}; // callerId -> DOM element
 let currentList = [];
+
+// Live level meter for whatever's plugged into the selected input, so you
+// can see right in the browser that audio is actually arriving (same idea
+// as vMix's input meter) instead of just trusting the device picker.
+function attachLineInMeter(stream) {
+  const token = ++lineInMeterToken;
+  const meterEl = document.getElementById('lineInMeter');
+  const labelEl = document.getElementById('lineInMeterLabel');
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    function tick() {
+      if (token !== lineInMeterToken) { audioCtx.close().catch(() => {}); return; }
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a, b) => a + b, 0) / data.length;
+      if (meterEl) meterEl.style.width = Math.min(100, avg * 1.5) + '%';
+      requestAnimationFrame(tick);
+    }
+    tick();
+    if (labelEl) labelEl.textContent = 'Live meter — this should move when there\u2019s audio on this input.';
+  } catch (e) { /* ignore */ }
+}
 
 // Grabs (once) the selected Line In / mic input as a stream. Shared by both
 // "Solo talk" and the automatic on-join feed below, so there's only ever one
@@ -117,6 +148,7 @@ async function ensureLineInStream() {
     }).then((stream) => {
       talkbackStream = stream;
       loadInputDevices(); // labels are available now that permission is granted
+      attachLineInMeter(stream);
       return stream;
     }).finally(() => { talkbackStreamPromise = null; });
   }
@@ -194,6 +226,9 @@ async function loadInputDevices() {
 }
 loadInputDevices();
 navigator.mediaDevices?.addEventListener?.('devicechange', loadInputDevices);
+ensureLineInStream().catch((e) => {
+  document.getElementById('lineInMeterLabel').textContent = 'Could not access this input yet: ' + e.message;
+});
 
 talkbackInputSelect.onchange = async () => {
   talkbackDeviceId = talkbackInputSelect.value;
@@ -213,6 +248,7 @@ talkbackInputSelect.onchange = async () => {
       });
       talkbackStream.getTracks().forEach((t) => t.stop());
       talkbackStream = newStream;
+      attachLineInMeter(newStream);
       talkbackInputMsg.textContent = 'Switched microphone for active talkback and the live feed.';
     } catch (e) {
       talkbackInputMsg.textContent = 'Could not switch microphone: ' + e.message;
