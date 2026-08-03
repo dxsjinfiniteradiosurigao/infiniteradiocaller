@@ -112,6 +112,10 @@
 <script src="/rtc-config.js"></script>
 <script>
 const socket = io();
+let joinedName = null;
+socket.on('connect', () => {
+  if (joinedName) socket.emit('register', { role: 'caller', name: joinedName });
+});
 let localStream = null;
 const peerConnections = {}; // remoteId -> RTCPeerConnection
 let rtcConfig = null;
@@ -318,6 +322,7 @@ document.getElementById('joinBtn').onclick = () => {
 
   setupMicMeter(localStream);
   setupSpeakerToggle();
+  joinedName = name;
   socket.emit('register', { role: 'caller', name });
 };
 
