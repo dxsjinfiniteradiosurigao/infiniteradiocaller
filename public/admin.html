@@ -55,6 +55,15 @@
   </div>
 
   <div class="card">
+    <div class="card-title"><span class="icon">🎙️</span> Talkback microphone</div>
+    <div class="subtitle" style="margin-bottom:10px;">Choose which microphone is used for "Solo talk" (per-caller talkback) — e.g. a mixer line carrying the DJ's voice instead of your laptop's built-in mic — so the caller hears the DJ, not just you.</div>
+    <select id="talkbackInputSelect" style="width:100%; padding:10px 12px; border-radius:9px; border:1px solid var(--border); background:var(--panel-3); color:var(--text); font-size:0.9rem;">
+      <option value="">Loading microphones…</option>
+    </select>
+    <div id="talkbackInputMsg" class="subtitle" style="margin-top:8px; font-size:0.78rem;"></div>
+  </div>
+
+  <div class="card">
     <div class="card-title"><span class="icon">🔊</span> DJ audio output</div>
     <div class="subtitle" style="margin-bottom:10px;">If a DJ forgets to switch their own screen's output, switch it for them here.</div>
     <div id="djOutputList"></div>
@@ -112,6 +121,66 @@ socket.on('settings-state', (settings) => {
 document.getElementById('muteAllBtn').onclick = () => {
   if (confirm('Mute every waiting/live caller right now?')) {
     socket.emit('mute-all');
+  }
+};
+
+// ---- Talkback microphone (audio input) selection ----
+// Lets you pick which input feeds "Solo talk" - e.g. a mixer channel
+// carrying the DJ's voice - instead of whatever mic the OS defaults to.
+// Device *labels* only show up once the browser has granted mic permission
+// at least once (same limitation dj.html already deals with for outputs).
+const talkbackInputSelect = document.getElementById('talkbackInputSelect');
+const talkbackInputMsg = document.getElementById('talkbackInputMsg');
+let talkbackDeviceId = '';
+
+async function loadInputDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((d) => d.kind === 'audioinput');
+    if (!inputs.length) {
+      talkbackInputSelect.innerHTML = '<option value="">No microphones found</option>';
+      return;
+    }
+    const labelsHidden = inputs.every((d) => !d.label);
+    talkbackInputSelect.innerHTML = '';
+    inputs.forEach((d, i) => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || ('Microphone ' + (i + 1));
+      if (d.deviceId === talkbackDeviceId) opt.selected = true;
+      talkbackInputSelect.appendChild(opt);
+    });
+    if (!talkbackDeviceId) talkbackDeviceId = talkbackInputSelect.value;
+    talkbackInputMsg.textContent = labelsHidden
+      ? 'Device names are hidden until mic access is granted - click "Solo talk" once on any tile, then re-open this list.'
+      : '';
+  } catch (e) {
+    talkbackInputSelect.innerHTML = '<option value="">Could not list microphones</option>';
+  }
+}
+loadInputDevices();
+navigator.mediaDevices?.addEventListener?.('devicechange', loadInputDevices);
+
+talkbackInputSelect.onchange = async () => {
+  talkbackDeviceId = talkbackInputSelect.value;
+  // If talkback is already live on one or more tiles, hot-swap the mic feed
+  // on all of them instead of making the admin stop/restart each call.
+  if (talkbackStream) {
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: talkbackDeviceId ? { deviceId: { exact: talkbackDeviceId } } : true
+      });
+      const newTrack = newStream.getAudioTracks()[0];
+      Object.values(talkbackPCs).forEach((pc) => {
+        const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+        if (sender) sender.replaceTrack(newTrack);
+      });
+      talkbackStream.getTracks().forEach((t) => t.stop());
+      talkbackStream = newStream;
+      talkbackInputMsg.textContent = 'Switched microphone for active talkback.';
+    } catch (e) {
+      talkbackInputMsg.textContent = 'Could not switch microphone: ' + e.message;
+    }
   }
 };
 
@@ -219,7 +288,11 @@ async function toggleTalkback(callerId, btn) {
   }
   try {
     if (!talkbackStream) {
-      talkbackStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      talkbackStream = await navigator.mediaDevices.getUserMedia({
+        audio: talkbackDeviceId ? { deviceId: { exact: talkbackDeviceId } } : true
+      });
+      // Permission is granted now, so device labels are available - refresh the list.
+      loadInputDevices();
     }
   } catch (e) {
     alert('Could not access your microphone for solo talk.');
