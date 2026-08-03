@@ -87,6 +87,7 @@ const callers = {};      // socketId -> { name, live, chat: [], audio, video }
 const admins = new Set();
 const djs = new Set();
 const vmixViewers = new Set();
+const djInfo = {};        // djSocketId -> { label, devices: [{deviceId,label}], currentDeviceId }
 
 let settings = {
   welcomeMessage: '',       // shown to every caller as soon as they join
@@ -98,6 +99,11 @@ function broadcastWaitingList() {
     id, name: c.name, live: c.live, audio: c.audio, video: c.video, chat: c.chat
   }));
   admins.forEach((a) => io.to(a).emit('waiting-list', list));
+}
+
+function broadcastDjInfo() {
+  const list = Object.entries(djInfo).map(([id, d]) => ({ id, ...d }));
+  admins.forEach((a) => io.to(a).emit('dj-info', list));
 }
 
 function currentLiveCallerId() {
@@ -140,10 +146,26 @@ io.on('connection', (socket) => {
       broadcastWaitingList();
     } else if (role === 'dj') {
       djs.add(socket.id);
+      djInfo[socket.id] = { label: socket.data.name || ('DJ ' + socket.id.slice(0, 4)), devices: [], currentDeviceId: null };
+      broadcastDjInfo();
     } else if (role === 'vmix') {
       vmixViewers.add(socket.id);
       broadcastVmixState();
     }
+  });
+
+  // DJ page reports which audio output devices its browser can see
+  socket.on('dj-devices', ({ devices, currentDeviceId }) => {
+    if (!djInfo[socket.id]) return;
+    djInfo[socket.id].devices = devices || [];
+    djInfo[socket.id].currentDeviceId = currentDeviceId || null;
+    broadcastDjInfo();
+  });
+
+  // Admin remotely switches a DJ browser's audio output device
+  socket.on('set-dj-output', ({ djId, deviceId }) => {
+    if (!djInfo[djId]) return;
+    io.to(djId).emit('apply-output', { deviceId });
   });
 
   // Admin updates global settings (welcome message, auto-mute default)
@@ -246,6 +268,8 @@ io.on('connection', (socket) => {
       admins.delete(socket.id);
     } else if (socket.data.role === 'dj') {
       djs.delete(socket.id);
+      delete djInfo[socket.id];
+      broadcastDjInfo();
     } else if (socket.data.role === 'vmix') {
       vmixViewers.delete(socket.id);
     }
