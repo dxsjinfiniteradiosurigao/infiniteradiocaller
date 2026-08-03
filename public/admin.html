@@ -132,6 +132,7 @@ document.getElementById('muteAllBtn').onclick = () => {
 const talkbackInputSelect = document.getElementById('talkbackInputSelect');
 const talkbackInputMsg = document.getElementById('talkbackInputMsg');
 let talkbackDeviceId = '';
+let talkbackDeviceChosenByUser = false; // true once the admin picks one manually - stop auto-selecting after that
 
 async function loadInputDevices() {
   try {
@@ -142,6 +143,15 @@ async function loadInputDevices() {
       return;
     }
     const labelsHidden = inputs.every((d) => !d.label);
+
+    // Default to a "Line In" device (e.g. Realtek Line In) if one exists and
+    // the admin hasn't manually picked something else - that's the input
+    // callers get routed to when you use "Solo talk".
+    if (!talkbackDeviceChosenByUser) {
+      const lineIn = inputs.find((d) => /line[\s-]?in/i.test(d.label));
+      if (lineIn) talkbackDeviceId = lineIn.deviceId;
+    }
+
     talkbackInputSelect.innerHTML = '';
     inputs.forEach((d, i) => {
       const opt = document.createElement('option');
@@ -151,9 +161,14 @@ async function loadInputDevices() {
       talkbackInputSelect.appendChild(opt);
     });
     if (!talkbackDeviceId) talkbackDeviceId = talkbackInputSelect.value;
-    talkbackInputMsg.textContent = labelsHidden
-      ? 'Device names are hidden until mic access is granted - click "Solo talk" once on any tile, then re-open this list.'
-      : '';
+
+    if (labelsHidden) {
+      talkbackInputMsg.textContent = 'Device names are hidden until mic access is granted - click "Solo talk" once on any tile, then re-open this list.';
+    } else if (talkbackInputSelect.selectedOptions[0] && /line[\s-]?in/i.test(talkbackInputSelect.selectedOptions[0].textContent)) {
+      talkbackInputMsg.textContent = 'Using Line In - callers will hear whatever is plugged into it.';
+    } else {
+      talkbackInputMsg.textContent = '';
+    }
   } catch (e) {
     talkbackInputSelect.innerHTML = '<option value="">Could not list microphones</option>';
   }
@@ -163,6 +178,7 @@ navigator.mediaDevices?.addEventListener?.('devicechange', loadInputDevices);
 
 talkbackInputSelect.onchange = async () => {
   talkbackDeviceId = talkbackInputSelect.value;
+  talkbackDeviceChosenByUser = true;
   // If talkback is already live on one or more tiles, hot-swap the mic feed
   // on all of them instead of making the admin stop/restart each call.
   if (talkbackStream) {
