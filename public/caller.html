@@ -140,20 +140,42 @@ document.getElementById('grantBtn').onclick = async () => {
   const errMsg = document.getElementById('permErrMsg');
   errMsg.textContent = '';
 
+  // Single combined request: audio + video are asked for in ONE getUserMedia
+  // call so there's only one prompt triggered from the page's side. Note: on
+  // iPhone, iOS itself (not this code) shows camera and mic as two separate
+  // system dialogs back-to-back the first time a site asks for both - that's
+  // an OS-level behavior Safari doesn't let any site skip. Android/Chrome
+  // normally shows one combined dialog for a combined request like this.
+  const audioConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: wantVideo ? { width: 320, height: 240 } : false
+      audio: audioConstraints,
+      video: wantVideo ? { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: 'user' } : false
     });
   } catch (e) {
-    errMsg.textContent = 'Microphone access was blocked or unavailable. Please allow permission in your browser settings and try again.';
-    return;
+    if (wantVideo) {
+      // Camera may be the part that failed (in use, blocked, no camera on
+      // this device). Fall back to audio-only instead of blocking the caller
+      // from joining entirely.
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        document.getElementById('videoToggle').checked = false;
+        errMsg.textContent = 'Camera wasn\u2019t available, so we joined with microphone only.';
+      } catch (e2) {
+        errMsg.textContent = 'Microphone access was blocked or unavailable. Please allow permission in your browser settings and try again.';
+        return;
+      }
+    } else {
+      errMsg.textContent = 'Microphone access was blocked or unavailable. Please allow permission in your browser settings and try again.';
+      return;
+    }
   }
 
   document.getElementById('permCard').style.display = 'none';
   document.getElementById('joinCard').style.display = 'block';
 
-  if (wantVideo) {
+  if (localStream.getVideoTracks().length) {
     const preview = document.getElementById('selfPreviewJoin');
     preview.style.display = 'block';
     preview.srcObject = localStream;
@@ -170,18 +192,26 @@ document.getElementById('grantBtn').onclick = async () => {
 // with a near-silent clip, then reuse this exact element for the real
 // studio-talkback stream later.
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+let talkbackAudioUnlocked = false;
 function primeTalkbackAudio() {
   const audioEl = document.getElementById('talkbackAudio');
-  if (!audioEl) return;
+  if (!audioEl || talkbackAudioUnlocked) return;
   audioEl.muted = true;
   audioEl.src = SILENT_WAV;
   audioEl.play().then(() => {
+    talkbackAudioUnlocked = true;
     audioEl.pause();
     audioEl.currentTime = 0;
-    audioEl.removeAttribute('src');
-  }).catch(() => { /* if this fails, the later real play() will log its own error */ })
+    // NOTE: intentionally NOT removing the src attribute here - on iOS Safari
+    // that can reset the element's "activated by a user gesture" state,
+    // which is exactly what re-blocks the real talkback stream later.
+  }).catch(() => { /* if this fails, the real play() below still tries */ })
     .finally(() => { audioEl.muted = false; });
 }
+
+// Call this from more than one tap so we get another chance to unlock
+// playback if the first one (grant button) happens before joinBtn exists.
+document.getElementById('grantBtn').addEventListener('click', primeTalkbackAudio);
 
 document.getElementById('joinBtn').onclick = () => {
   const name = document.getElementById('nameInput').value.trim();
@@ -243,7 +273,17 @@ async function getOrCreatePC(remoteId, purpose) {
       const audioEl = document.getElementById('talkbackAudio');
       if (!audioEl) return;
       audioEl.srcObject = e.streams[0];
-      audioEl.play().catch((err) => console.error('Talkback audio failed to play:', err));
+      audioEl.play().catch(() => {
+        // Some mobile browsers still block this even after priming (e.g. if
+        // the tab was backgrounded in between). Retry muted - a caller who's
+        // staring at the "studio is talking to you" banner with no sound
+        // will at least see the banner, and a muted+playing element can be
+        // unmuted programmatically without another user gesture on most
+        // browsers, so unmute right after it starts.
+        audioEl.muted = true;
+        audioEl.play().then(() => { audioEl.muted = false; })
+          .catch((err) => console.error('Talkback audio failed to play:', err));
+      });
     };
   }
 
