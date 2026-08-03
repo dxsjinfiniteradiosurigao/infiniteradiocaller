@@ -14,8 +14,18 @@
       <div class="subtitle" style="margin-bottom:0;">Preview waiting callers, chat with them, then push one live to the DJ screens.</div>
     </div>
     <div class="action-row">
+      <button class="btn-ghost" id="djCamToggleBtn">📷 My camera monitor</button>
       <button class="btn-danger-ghost" id="muteAllBtn">🔇 Mute everyone</button>
     </div>
+  </div>
+
+  <!-- Small floating self-monitor so the DJ can see their own camera framing while on air -->
+  <div id="djCamMonitor" style="display:none; position:fixed; bottom:18px; right:18px; width:180px; z-index:1000; background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:8px; box-shadow:0 6px 20px rgba(0,0,0,0.35);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+      <span class="subtitle" style="font-size:0.7rem;">My camera</span>
+      <button id="djCamCloseBtn" class="btn-ghost" style="padding:2px 8px; font-size:0.7rem;">✕</button>
+    </div>
+    <video id="djCamVideo" autoplay muted playsinline style="width:100%; border-radius:6px; transform:scaleX(-1);"></video>
   </div>
 
   <div class="card">
@@ -230,6 +240,34 @@ ensureLineInStream().catch((e) => {
   document.getElementById('lineInMeterLabel').textContent = 'Could not access this input yet: ' + e.message;
 });
 
+// ---- DJ self-camera monitor (small floating preview, mic never sent anywhere) ----
+let djCamStream = null;
+async function toggleDjCamMonitor(show) {
+  const box = document.getElementById('djCamMonitor');
+  const video = document.getElementById('djCamVideo');
+  if (show) {
+    if (!djCamStream) {
+      try {
+        djCamStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      } catch (e) {
+        alert('Could not access a camera for the monitor: ' + e.message);
+        return;
+      }
+    }
+    video.srcObject = djCamStream;
+    box.style.display = 'block';
+  } else {
+    box.style.display = 'none';
+    if (djCamStream) {
+      djCamStream.getTracks().forEach((t) => t.stop());
+      djCamStream = null;
+      video.srcObject = null;
+    }
+  }
+}
+document.getElementById('djCamToggleBtn').onclick = () => toggleDjCamMonitor(true);
+document.getElementById('djCamCloseBtn').onclick = () => toggleDjCamMonitor(false);
+
 talkbackInputSelect.onchange = async () => {
   talkbackDeviceId = talkbackInputSelect.value;
   talkbackDeviceChosenByUser = true;
@@ -307,6 +345,52 @@ function setupMeter(stream, meterEl) {
   } catch (e) { /* ignore */ }
 }
 
+// Builds (or rebuilds) the Web Audio graph a tile uses to actually play back
+// a caller's audio: source -> gainNode -> (analyser + speakers). The volume
+// slider and auto-gain both just adjust gainNode.gain - the video element's
+// own audio stays permanently muted so there's only one audio path per tile.
+function setupTileAudio(tile, stream) {
+  if (tile._audio) {
+    try { tile._audio.ctx.close(); } catch (e) {}
+    cancelAnimationFrame(tile._audio.raf);
+  }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = ctx.createMediaStreamSource(stream);
+  const gainNode = ctx.createGain();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(gainNode);
+  gainNode.connect(analyser);
+  gainNode.connect(ctx.destination);
+  const slider = tile.querySelector('.volumeSlider');
+  const muted = tile.querySelector('.unmuteBtn').dataset.muted !== 'false';
+  gainNode.gain.value = muted ? 0 : Number(slider.value) / 100;
+  tile._audio = { ctx, gainNode, analyser, autoGain: tile.querySelector('.autoGainToggle').checked };
+  if (tile._audio.autoGain) startAutoGain(tile);
+}
+
+// Simple continuous auto-gain: nudges gainNode.gain toward a target average
+// level instead of jumping straight there, so it doesn't pump/distort on
+// transients. Only adjusts while the tile isn't muted.
+function startAutoGain(tile) {
+  const TARGET = 70; // target average byte level, 0-255
+  function loop() {
+    if (!tile._audio || !tile._audio.autoGain) return;
+    const { analyser, gainNode } = tile._audio;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+    const avg = data.reduce((a, b) => a + b, 0) / data.length;
+    const muted = tile.querySelector('.unmuteBtn').dataset.muted !== 'false';
+    if (!muted && avg > 2) {
+      const error = TARGET / Math.max(avg, 1);
+      const nudged = gainNode.gain.value * (0.92 + 0.08 * error);
+      gainNode.gain.value = Math.max(0.2, Math.min(4, nudged));
+    }
+    tile._audio.raf = requestAnimationFrame(loop);
+  }
+  loop();
+}
+
 async function connectPreview(callerId) {
   if (previewPCs[callerId]) return;
   const pc = new RTCPeerConnection(await getRtc());
@@ -329,11 +413,16 @@ async function connectPreview(callerId) {
     const stream = e.streams[0];
     if (video.srcObject !== stream) {
       video.srcObject = stream;
-      // Browsers block unmuted autoplay - start muted, admin can unmute per tile.
+      // The video element itself never makes sound now - actual playback
+      // goes through the Web Audio gain graph below, so the volume
+      // slider/auto-gain controls have something real to act on.
       video.muted = true;
       video.play().catch(() => {});
       const meter = tile.querySelector('.micMeter');
-      if (stream.getAudioTracks().length) setupMeter(stream, meter);
+      if (stream.getAudioTracks().length) {
+        setupMeter(stream, meter);
+        setupTileAudio(tile, stream);
+      }
       const hasVideo = stream.getVideoTracks().length > 0;
       tile.querySelector('.noVideoNote').style.display = hasVideo ? 'none' : 'block';
     }
@@ -468,6 +557,11 @@ function renderList(list) {
           <div class="meter-track"><div class="micMeter meter-fill"></div></div>
           <div class="subtitle" style="margin-top:4px; font-size:0.7rem;">Mic level</div>
         </div>
+        <div style="margin-top:8px; display:flex; align-items:center; gap:8px;">
+          <span class="subtitle" style="font-size:0.7rem;">Vol</span>
+          <input type="range" class="volumeSlider" min="0" max="200" value="100" style="flex:1;">
+          <label class="check" style="font-size:0.7rem; white-space:nowrap;"><input type="checkbox" class="autoGainToggle"> Auto gain</label>
+        </div>
         <div class="tile-actions">
           <button class="btn-live goLiveBtn">Go live</button>
           <button class="btn-stop stopBtn" style="display:none;">Stop</button>
@@ -506,9 +600,29 @@ function renderList(list) {
       };
 
       tile.querySelector('.unmuteBtn').onclick = (ev) => {
-        const video = tile.querySelector('video');
-        video.muted = !video.muted;
-        ev.target.textContent = video.muted ? '🔇 Unmute preview' : '🔊 Mute preview';
+        const btn = ev.target;
+        const wasMuted = btn.dataset.muted !== 'false';
+        const nowMuted = !wasMuted;
+        btn.dataset.muted = String(nowMuted);
+        btn.textContent = nowMuted ? '🔇 Unmute preview' : '🔊 Mute preview';
+        if (tile._audio) {
+          tile._audio.gainNode.gain.value = nowMuted ? 0 : Number(tile.querySelector('.volumeSlider').value) / 100;
+        }
+      };
+      tile.querySelector('.unmuteBtn').dataset.muted = 'true';
+
+      tile.querySelector('.volumeSlider').oninput = (ev) => {
+        if (!tile._audio || tile._audio.autoGain) return; // auto-gain drives the level itself while enabled
+        if (tile.querySelector('.unmuteBtn').dataset.muted === 'false') {
+          tile._audio.gainNode.gain.value = Number(ev.target.value) / 100;
+        }
+      };
+
+      tile.querySelector('.autoGainToggle').onchange = (ev) => {
+        const enabled = ev.target.checked;
+        tile.querySelector('.volumeSlider').disabled = enabled;
+        if (tile._audio) tile._audio.autoGain = enabled;
+        if (enabled) startAutoGain(tile);
       };
 
       tile.querySelector('.toggleMicBtn').onclick = (ev) => {
