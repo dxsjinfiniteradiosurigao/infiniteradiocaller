@@ -104,7 +104,7 @@
 <script src="/rtc-config.js"></script>
 <script>
 const socket = io();
-socket.emit('register', { role: 'admin' });
+socket.on('connect', () => socket.emit('register', { role: 'admin' }));
 
 document.getElementById('callerLink').textContent = location.origin + '/caller.html';
 document.getElementById('vmixLink').textContent = location.origin + '/vmix.html';
