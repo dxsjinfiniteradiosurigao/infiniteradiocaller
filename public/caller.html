@@ -65,6 +65,7 @@
     </div>
     <div id="mediaStatus" style="margin-top:10px; font-size:0.85rem; color:var(--muted);"></div>
     <div id="connStatusLine" style="margin-top:4px; font-size:0.75rem; color:var(--muted);"></div>
+    <div id="programStatusLine" style="margin-top:4px; font-size:0.75rem; color:var(--muted);">🔊 Live audio: connecting…</div>
     <div id="talkbackBanner" style="display:none; margin-top:10px;" class="status-pill">
       <span class="dot on"></span> 🎙️ Studio is talking to you
     </div>
@@ -283,7 +284,8 @@ async function getOrCreatePC(remoteId, purpose) {
     // created at Join time (see above), no extra tap needed.
     pc.ontrack = (e) => {
       const stream = e.streams[0];
-      if (!sharedAudioCtx) return;
+      console.log('[program feed] ontrack fired, audio tracks:', stream.getAudioTracks().length);
+      if (!sharedAudioCtx) { console.warn('[program feed] no sharedAudioCtx yet - was Join tapped?'); return; }
       if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume().catch(() => {});
       try {
         const src = sharedAudioCtx.createMediaStreamSource(stream);
@@ -335,6 +337,12 @@ async function getOrCreatePC(remoteId, purpose) {
         const connected = pc.connectionState === 'connected' || pc.connectionState === 'completed';
         banner.style.display = connected ? 'inline-flex' : 'none';
       }
+      return;
+    }
+    if (purpose === 'program') {
+      console.log('[program feed] connection state:', pc.connectionState);
+      const el = document.getElementById('programStatusLine');
+      if (el) el.textContent = '🔊 Live audio: ' + friendlyIceStatus(pc.connectionState);
       return;
     }
     const el = document.getElementById('connStatusLine');
