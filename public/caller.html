@@ -68,6 +68,7 @@
     <div id="talkbackBanner" style="display:none; margin-top:10px;" class="status-pill">
       <span class="dot on"></span> 🎙️ Studio is talking to you
     </div>
+    <audio id="talkbackAudio" playsinline style="display:none;"></audio>
     <div class="tip-banner">
       <span class="tip-icon">🎧</span>
       <span><strong>Tip:</strong> earphones or a headset give the cleanest sound on air — speaker audio can echo into your mic.</span>
@@ -160,6 +161,28 @@ document.getElementById('grantBtn').onclick = async () => {
 };
 
 // ---- Step 2: name + join (mic/camera already granted by this point) ----
+
+// Mobile Safari (and some Android browsers) only allow an <audio> element to
+// start playing later via JS if that *same element* already played once
+// inside a direct user tap. A brand-new element created after the tap - like
+// one built when the talkback stream first arrives - gets silently blocked.
+// So we "prime" the real talkbackAudio element here, inside the Join click,
+// with a near-silent clip, then reuse this exact element for the real
+// studio-talkback stream later.
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+function primeTalkbackAudio() {
+  const audioEl = document.getElementById('talkbackAudio');
+  if (!audioEl) return;
+  audioEl.muted = true;
+  audioEl.src = SILENT_WAV;
+  audioEl.play().then(() => {
+    audioEl.pause();
+    audioEl.currentTime = 0;
+    audioEl.removeAttribute('src');
+  }).catch(() => { /* if this fails, the later real play() will log its own error */ })
+    .finally(() => { audioEl.muted = false; });
+}
+
 document.getElementById('joinBtn').onclick = () => {
   const name = document.getElementById('nameInput').value.trim();
   const errMsg = document.getElementById('errMsg');
@@ -167,6 +190,8 @@ document.getElementById('joinBtn').onclick = () => {
 
   if (!name) { errMsg.textContent = 'Please enter your name.'; return; }
   if (!localStream) { errMsg.textContent = 'Microphone access is required — please refresh and try again.'; return; }
+
+  primeTalkbackAudio();
 
   document.getElementById('joinCard').style.display = 'none';
   document.getElementById('waitCard').style.display = 'block';
@@ -215,19 +240,9 @@ async function getOrCreatePC(remoteId, purpose) {
   if (purpose === 'talkback') {
     // Admin is whispering privately to this caller only — never sent to DJs.
     pc.ontrack = (e) => {
-      let audioEl = document.getElementById('talkbackAudio');
-      if (!audioEl) {
-        audioEl = document.createElement('audio');
-        audioEl.id = 'talkbackAudio';
-        audioEl.autoplay = true;
-        document.body.appendChild(audioEl);
-      }
+      const audioEl = document.getElementById('talkbackAudio');
+      if (!audioEl) return;
       audioEl.srcObject = e.streams[0];
-      // Relying on the autoplay attribute alone isn't reliable once an
-      // element's srcObject is assigned after the fact - call play()
-      // explicitly (same pattern dj.html/vmix.html already use) and log
-      // any rejection so it's visible in the console instead of silently
-      // producing no sound.
       audioEl.play().catch((err) => console.error('Talkback audio failed to play:', err));
     };
   }
