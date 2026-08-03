@@ -55,8 +55,8 @@
   </div>
 
   <div class="card">
-    <div class="card-title"><span class="icon">🎙️</span> Talkback microphone</div>
-    <div class="subtitle" style="margin-bottom:10px;">Choose which microphone is used for "Solo talk" (per-caller talkback) — e.g. a mixer line carrying the DJ's voice instead of your laptop's built-in mic — so the caller hears the DJ, not just you.</div>
+    <div class="card-title"><span class="icon">🎙️</span> Line In / talkback microphone</div>
+    <div class="subtitle" style="margin-bottom:10px;">Choose the input callers automatically hear the moment they join (e.g. a mixer "Line In" carrying the on-air show), and that's also used for "Solo talk" per-caller talkback.</div>
     <select id="talkbackInputSelect" style="width:100%; padding:10px 12px; border-radius:9px; border:1px solid var(--border); background:var(--panel-3); color:var(--text); font-size:0.9rem;">
       <option value="">Loading microphones…</option>
     </select>
@@ -100,9 +100,28 @@ RTC_CONFIG_PROMISE.then((cfg) => { resolvedRtcConfig = cfg; });
 async function getRtc() { if (!resolvedRtcConfig) resolvedRtcConfig = await RTC_CONFIG_PROMISE; return resolvedRtcConfig; }
 const previewPCs = {}; // callerId -> RTCPeerConnection
 const talkbackPCs = {}; // callerId -> RTCPeerConnection (solo talk)
+const programPCs = {}; // callerId -> RTCPeerConnection (continuous Line In feed, sent to every waiting caller automatically)
 let talkbackStream = null;
+let talkbackStreamPromise = null; // in-flight getUserMedia, so simultaneous callers don't each trigger their own permission/capture
 const tiles = {}; // callerId -> DOM element
 let currentList = [];
+
+// Grabs (once) the selected Line In / mic input as a stream. Shared by both
+// "Solo talk" and the automatic on-join feed below, so there's only ever one
+// capture of the hardware device instead of two competing ones.
+async function ensureLineInStream() {
+  if (talkbackStream) return talkbackStream;
+  if (!talkbackStreamPromise) {
+    talkbackStreamPromise = navigator.mediaDevices.getUserMedia({
+      audio: talkbackDeviceId ? { deviceId: { exact: talkbackDeviceId } } : true
+    }).then((stream) => {
+      talkbackStream = stream;
+      loadInputDevices(); // labels are available now that permission is granted
+      return stream;
+    }).finally(() => { talkbackStreamPromise = null; });
+  }
+  return talkbackStreamPromise;
+}
 
 // ---- Settings panel ----
 document.getElementById('autoMuteToggle').onchange = (e) => {
@@ -179,21 +198,22 @@ navigator.mediaDevices?.addEventListener?.('devicechange', loadInputDevices);
 talkbackInputSelect.onchange = async () => {
   talkbackDeviceId = talkbackInputSelect.value;
   talkbackDeviceChosenByUser = true;
-  // If talkback is already live on one or more tiles, hot-swap the mic feed
-  // on all of them instead of making the admin stop/restart each call.
+  // If the feed is already live (solo talk and/or the automatic on-join
+  // feed), hot-swap the input on all of them instead of making the admin
+  // stop/restart each call.
   if (talkbackStream) {
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
         audio: talkbackDeviceId ? { deviceId: { exact: talkbackDeviceId } } : true
       });
       const newTrack = newStream.getAudioTracks()[0];
-      Object.values(talkbackPCs).forEach((pc) => {
+      Object.values(talkbackPCs).concat(Object.values(programPCs)).forEach((pc) => {
         const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
         if (sender) sender.replaceTrack(newTrack);
       });
       talkbackStream.getTracks().forEach((t) => t.stop());
       talkbackStream = newStream;
-      talkbackInputMsg.textContent = 'Switched microphone for active talkback.';
+      talkbackInputMsg.textContent = 'Switched microphone for active talkback and the live feed.';
     } catch (e) {
       talkbackInputMsg.textContent = 'Could not switch microphone: ' + e.message;
     }
@@ -294,6 +314,32 @@ async function connectPreview(callerId) {
   socket.emit('signal', { to: callerId, data: { type: 'offer', sdp: offer, purpose: 'preview' } });
 }
 
+// Automatically sends the Line In feed to a caller the moment they join, so
+// they hear the on-air show while waiting instead of dead silence. Uses the
+// same input as "Solo talk" (see ensureLineInStream above).
+async function connectProgramFeed(callerId) {
+  if (programPCs[callerId]) return;
+  let stream;
+  try {
+    stream = await ensureLineInStream();
+  } catch (e) {
+    console.error('Could not start the live audio feed for caller', callerId, e);
+    return;
+  }
+  if (programPCs[callerId]) return; // a concurrent call already set this up
+  const pc = new RTCPeerConnection(await getRtc());
+  programPCs[callerId] = pc;
+  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('signal', { to: callerId, data: { type: 'candidate', candidate: e.candidate, purpose: 'program' } });
+    }
+  };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit('signal', { to: callerId, data: { type: 'offer', sdp: offer, purpose: 'program' } });
+}
+
 async function toggleTalkback(callerId, btn) {
   if (talkbackPCs[callerId]) {
     talkbackPCs[callerId].close();
@@ -302,21 +348,16 @@ async function toggleTalkback(callerId, btn) {
     btn.classList.remove('btn-live');
     return;
   }
+  let stream;
   try {
-    if (!talkbackStream) {
-      talkbackStream = await navigator.mediaDevices.getUserMedia({
-        audio: talkbackDeviceId ? { deviceId: { exact: talkbackDeviceId } } : true
-      });
-      // Permission is granted now, so device labels are available - refresh the list.
-      loadInputDevices();
-    }
+    stream = await ensureLineInStream();
   } catch (e) {
     alert('Could not access your microphone for solo talk.');
     return;
   }
   const pc = new RTCPeerConnection(await getRtc());
   talkbackPCs[callerId] = pc;
-  talkbackStream.getTracks().forEach((t) => pc.addTrack(t, talkbackStream));
+  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
   pc.onicecandidate = (e) => {
     if (e.candidate) {
       socket.emit('signal', { to: callerId, data: { type: 'candidate', candidate: e.candidate, purpose: 'talkback' } });
@@ -331,7 +372,7 @@ async function toggleTalkback(callerId, btn) {
 
 socket.on('signal', async ({ from, data }) => {
   const purpose = data.purpose || 'preview';
-  const pc = purpose === 'talkback' ? talkbackPCs[from] : previewPCs[from];
+  const pc = purpose === 'talkback' ? talkbackPCs[from] : (purpose === 'program' ? programPCs[from] : previewPCs[from]);
   if (!pc) return;
   if (data.type === 'answer') {
     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
@@ -369,6 +410,7 @@ function renderList(list) {
       delete tiles[id];
       if (previewPCs[id]) { previewPCs[id].close(); delete previewPCs[id]; }
       if (talkbackPCs[id]) { talkbackPCs[id].close(); delete talkbackPCs[id]; }
+      if (programPCs[id]) { programPCs[id].close(); delete programPCs[id]; }
     }
   });
 
@@ -418,6 +460,7 @@ function renderList(list) {
       grid.appendChild(tile);
       tiles[c.id] = tile;
       connectPreview(c.id);
+      connectProgramFeed(c.id);
 
       tile.querySelector('.goLiveBtn').onclick = () => socket.emit('go-live', { callerId: c.id });
       tile.querySelector('.stopBtn').onclick = () => socket.emit('stop-live', { callerId: c.id });
