@@ -46,7 +46,7 @@
 <script src="/rtc-config.js"></script>
 <script>
 const socket = io();
-socket.emit('register', { role: 'dj' });
+socket.on('connect', () => socket.emit('register', { role: 'dj' }));
 
 const onlyCallerId = new URLSearchParams(location.search).get('only');
 
