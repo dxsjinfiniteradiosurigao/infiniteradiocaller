@@ -27,9 +27,18 @@
     </div>
   </div>
 
+  <div class="card" style="margin-top:18px;">
+    <div class="card-title"><span class="icon">🔊</span> Audio output</div>
+    <div class="subtitle" style="margin-bottom:10px;">Choose which device this screen plays caller audio through — e.g. your Sound Blaster instead of built-in speakers.</div>
+    <select id="outputSelect" style="width:100%; padding:10px 12px; border-radius:9px; border:1px solid var(--border); background:var(--panel-3); color:var(--text); font-size:0.9rem;">
+      <option value="">Loading devices…</option>
+    </select>
+    <div id="outputMsg" class="subtitle" style="margin-top:8px; font-size:0.78rem;"></div>
+  </div>
+
   <div id="unlockOverlay" class="card" style="text-align:center; margin-top:20px;">
     <div style="margin-bottom:10px;">🔊 Click below once so this tab is allowed to play caller audio.</div>
-    <button class="btn-primary" id="unlockBtn">Enable Audio for This Screen</button>
+    <button class="btn-primary" id="unlockBtn">Enable audio for this screen</button>
   </div>
 </div>
 
@@ -40,6 +49,71 @@ const socket = io();
 socket.emit('register', { role: 'dj' });
 
 const onlyCallerId = new URLSearchParams(location.search).get('only');
+
+// ---- Audio output device selection ----
+// setSinkId lets this page route audio to a specific device (e.g. a Sound
+// Blaster USB output vs onboard speakers). Chrome/Edge only — Firefox/Safari
+// don't support setSinkId yet, so the dropdown will show "Not supported" there.
+const outputSelect = document.getElementById('outputSelect');
+const outputMsg = document.getElementById('outputMsg');
+const supportsSinkId = typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
+
+async function applyOutputDevice(deviceId) {
+  const video = document.getElementById('liveVideo');
+  if (!supportsSinkId) return;
+  try {
+    await video.setSinkId(deviceId || '');
+    outputMsg.textContent = 'Playing through: ' + (outputSelect.selectedOptions[0]?.textContent || 'default');
+    reportDevicesToAdmin(deviceId);
+  } catch (e) {
+    outputMsg.textContent = 'Could not switch output: ' + e.message;
+  }
+}
+
+function reportDevicesToAdmin(currentDeviceId) {
+  const devices = Array.from(outputSelect.options).map((o) => ({ deviceId: o.value, label: o.textContent }));
+  socket.emit('dj-devices', { devices, currentDeviceId: currentDeviceId ?? outputSelect.value });
+}
+
+async function loadOutputDevices() {
+  if (!supportsSinkId) {
+    outputSelect.innerHTML = '<option value="">Not supported in this browser — use Chrome or Edge</option>';
+    outputSelect.disabled = true;
+    return;
+  }
+  try {
+    // Labels are only populated if mic/cam permission was granted on this
+    // origin at some point; that's fine — device IDs still work either way.
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const outputs = devices.filter((d) => d.kind === 'audiooutput');
+    outputSelect.innerHTML = '';
+    if (!outputs.length) {
+      outputSelect.innerHTML = '<option value="">No output devices found</option>';
+      return;
+    }
+    outputs.forEach((d, i) => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || ('Output device ' + (i + 1));
+      outputSelect.appendChild(opt);
+    });
+    reportDevicesToAdmin(outputSelect.value);
+  } catch (e) {
+    outputSelect.innerHTML = '<option value="">Could not list devices</option>';
+  }
+}
+loadOutputDevices();
+navigator.mediaDevices?.addEventListener?.('devicechange', loadOutputDevices);
+
+outputSelect.onchange = () => applyOutputDevice(outputSelect.value);
+
+// Admin can remotely force this DJ screen to a specific device, in case the
+// DJ forgets to switch it themselves before the show.
+socket.on('apply-output', ({ deviceId }) => {
+  outputSelect.value = deviceId;
+  applyOutputDevice(deviceId);
+  outputMsg.textContent = 'Output switched remotely by admin.';
+});
 
 let resolvedRtcConfig = null;
 RTC_CONFIG_PROMISE.then((cfg) => { resolvedRtcConfig = cfg; });
