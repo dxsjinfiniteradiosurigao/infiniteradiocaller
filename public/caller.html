@@ -97,6 +97,13 @@ const socket = io();
 let localStream = null;
 const peerConnections = {}; // remoteId -> RTCPeerConnection
 let rtcConfig = null;
+// Created inside the Join button's click handler so it starts in the
+// "running" state (a real user gesture unlocks it). Reused for talkback
+// playback below - piping audio through an already-running AudioContext
+// avoids the separate, less predictable autoplay rules that plain <audio>
+// elements are subject to (this is what was still silent on Android Chrome
+// after the tab had been sitting in the waiting room for a bit).
+let sharedAudioCtx = null;
 RTC_CONFIG_PROMISE.then((cfg) => { rtcConfig = cfg; });
 
 // ---- Step 0: detect Facebook/Messenger/Instagram/TikTok in-app browsers ----
@@ -234,13 +241,16 @@ document.getElementById('joinBtn').onclick = () => {
     preview.srcObject = localStream;
   }
 
+  sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  sharedAudioCtx.resume().catch(() => {});
+
   setupMicMeter(localStream);
   socket.emit('register', { role: 'caller', name });
 };
 
 function setupMicMeter(stream) {
   try {
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const audioCtx = sharedAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
     const source = audioCtx.createMediaStreamSource(stream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 256;
@@ -270,20 +280,34 @@ async function getOrCreatePC(remoteId, purpose) {
   if (purpose === 'talkback') {
     // Admin is whispering privately to this caller only — never sent to DJs.
     pc.ontrack = (e) => {
+      const stream = e.streams[0];
+
+      // Primary path: pipe the incoming stream through the shared
+      // AudioContext straight to speakers. This context was created (and
+      // resumed) inside the Join button's click, so it's already unlocked -
+      // no separate autoplay permission check applies to routing audio
+      // through an existing running context, which is what makes this more
+      // reliable than <audio>.play() on Android Chrome after the tab has
+      // been idle for a while in the waiting room.
+      if (sharedAudioCtx) {
+        if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume().catch(() => {});
+        try {
+          const src = sharedAudioCtx.createMediaStreamSource(stream);
+          src.connect(sharedAudioCtx.destination);
+        } catch (err) {
+          console.error('Talkback Web Audio routing failed:', err);
+        }
+      }
+
+      // Backup path: also try the plain <audio> element, muted, purely so
+      // there's a second attempt in browsers where the above fails for some
+      // reason. Muted avoids doubled/echoed audio if both paths succeed.
       const audioEl = document.getElementById('talkbackAudio');
-      if (!audioEl) return;
-      audioEl.srcObject = e.streams[0];
-      audioEl.play().catch(() => {
-        // Some mobile browsers still block this even after priming (e.g. if
-        // the tab was backgrounded in between). Retry muted - a caller who's
-        // staring at the "studio is talking to you" banner with no sound
-        // will at least see the banner, and a muted+playing element can be
-        // unmuted programmatically without another user gesture on most
-        // browsers, so unmute right after it starts.
+      if (audioEl) {
+        audioEl.srcObject = stream;
         audioEl.muted = true;
-        audioEl.play().then(() => { audioEl.muted = false; })
-          .catch((err) => console.error('Talkback audio failed to play:', err));
-      });
+        audioEl.play().catch(() => {});
+      }
     };
   }
 
