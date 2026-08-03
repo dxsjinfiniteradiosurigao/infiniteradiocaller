@@ -365,6 +365,7 @@ async function connectProgramFeed(callerId) {
   if (programPCs[callerId]) return; // a concurrent call already set this up
   const pc = new RTCPeerConnection(await getRtc());
   programPCs[callerId] = pc;
+  pc.onconnectionstatechange = () => console.log('[program feed -> ' + callerId + '] connection state:', pc.connectionState);
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));
   pc.onicecandidate = (e) => {
     if (e.candidate) {
