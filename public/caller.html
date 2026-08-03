@@ -75,10 +75,10 @@
     <div id="connStatusLine" style="margin-top:4px; font-size:0.75rem; color:var(--muted);"></div>
     <div id="programStatusLine" style="margin-top:4px; font-size:0.75rem; color:var(--muted);">🔊 Live audio: connecting…</div>
     <div id="speakerToggleWrap" style="margin-top:12px; display:none;">
-      <div class="subtitle" style="margin-bottom:6px;">Playback route</div>
+      <div class="subtitle" style="margin-bottom:6px;">Playback mode</div>
       <div style="display:flex; gap:6px;">
         <button type="button" class="btn-ghost speakerBtn" data-route="speaker" style="flex:1;">🔊 Loudspeaker</button>
-        <button type="button" class="btn-ghost speakerBtn" data-route="earpiece" style="flex:1;">📱 Earpiece</button>
+        <button type="button" class="btn-ghost speakerBtn" data-route="earpiece" style="flex:1;">📱 Phone-call mode</button>
       </div>
       <div id="speakerMsg" class="subtitle" style="margin-top:6px; font-size:0.72rem;"></div>
     </div>
@@ -86,6 +86,7 @@
       <span class="dot on"></span> 🎙️ Studio is talking to you
     </div>
     <audio id="talkbackAudio" playsinline style="display:none;"></audio>
+    <video id="routeVideo" playsinline autoplay muted style="display:none; width:2px; height:2px;"></video>
     <div class="tip-banner">
       <span class="tip-icon">🎧</span>
       <span><strong>Tip:</strong> earphones or a headset give the cleanest sound on air — speaker audio can echo into your mic.</span>
@@ -262,18 +263,29 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAE
 let talkbackAudioUnlocked = false;
 function primeTalkbackAudio() {
   const audioEl = document.getElementById('talkbackAudio');
-  if (!audioEl || talkbackAudioUnlocked) return;
-  audioEl.muted = true;
-  audioEl.src = SILENT_WAV;
-  audioEl.play().then(() => {
-    talkbackAudioUnlocked = true;
-    audioEl.pause();
-    audioEl.currentTime = 0;
-    // NOTE: intentionally NOT removing the src attribute here - on iOS Safari
-    // that can reset the element's "activated by a user gesture" state,
-    // which is exactly what re-blocks the real talkback stream later.
-  }).catch(() => { /* if this fails, the real play() below still tries */ })
-    .finally(() => { audioEl.muted = false; });
+  const videoEl = document.getElementById('routeVideo');
+  if (talkbackAudioUnlocked) return;
+  talkbackAudioUnlocked = true;
+  // Priming UNMUTED (just very quiet, not muted=true) matters: iOS Safari
+  // picks its audio session "category" from whether the first successful
+  // play() on the page was actually audible. A muted first play can lock
+  // Safari into the quieter "ambient" category (obeys the silent switch,
+  // lower ceiling) for the rest of the page's life, which is very likely
+  // why real talkback/line-in audio sounded quiet even at full volume.
+  [audioEl, videoEl].forEach((el) => {
+    if (!el) return;
+    el.muted = false;
+    el.volume = 0.05;
+    el.src = SILENT_WAV;
+    el.play().then(() => {
+      el.pause();
+      el.currentTime = 0;
+      el.volume = 1;
+      // NOTE: intentionally NOT removing the src attribute here - on iOS
+      // Safari that can reset the element's "activated by a gesture" state,
+      // which is exactly what re-blocks real audio later.
+    }).catch(() => { el.volume = 1; });
+  });
 }
 
 // Call this from more than one tap so we get another chance to unlock
@@ -309,49 +321,97 @@ document.getElementById('joinBtn').onclick = () => {
   socket.emit('register', { role: 'caller', name });
 };
 
-// ---- Speaker route toggle (loudspeaker vs earpiece) ----
-// Honest limitation up front: setSinkId() to pick an output device only
-// works in some Chromium-based Android browsers, and there's no earpiece
-// route exposed on iOS Safari at all from a web page - the OS doesn't give
-// pages that control. Where it's not supported we say so instead of
-// pretending the button did something.
+// ---- Unified audio routing for talkback + Line In (program) audio ----
+// Both incoming streams get mixed into one MediaStreamDestination via a gain
+// node (boosted a bit - addresses "volume is low" on iPhone), then played
+// out through ONE of two real DOM elements depending on mode:
+//   - <video id="routeVideo">  -> iOS treats this as a "video" audio session,
+//     which is what reliably forces the LOUDSPEAKER on iPhone.
+//   - <audio id="talkbackAudio"> (audio-only element, no video attached)
+//     -> closer to how a plain WebRTC voice call behaves, so iOS is more
+//     likely to route it to the EARPIECE (with the proximity sensor turning
+//     the screen off near your ear), like a normal phone call.
+// Important limits, stated plainly instead of pretending this always works:
+//   - This earpiece-style behavior is an iOS Safari quirk, not a documented
+//     API - it can only work when NO video is actively streaming (a live
+//     camera forces iOS into "video call" = speaker, no matter what we do).
+//   - Android exposes no earpiece output to web pages at all. On Android,
+//     "Phone-call mode" and "Loudspeaker" will sound identical - both play
+//     through the loudspeaker, because that's the only thing a webpage can
+//     reach there.
+let routeDestNode = null;
+let audioRouteMode = 'speaker'; // 'speaker' | 'earpiece'
+
+function ensureRouteGraph() {
+  if (!sharedAudioCtx) return null;
+  if (!routeDestNode) routeDestNode = sharedAudioCtx.createMediaStreamDestination();
+  return routeDestNode;
+}
+
+// Call this from each incoming stream's ontrack (talkback, program) instead
+// of connecting straight to sharedAudioCtx.destination.
+function routeIncomingStream(stream) {
+  const dest = ensureRouteGraph();
+  if (!dest) return;
+  try {
+    const source = sharedAudioCtx.createMediaStreamSource(stream);
+    const gainNode = sharedAudioCtx.createGain();
+    gainNode.gain.value = 1.7; // modest boost for the "volume is low" complaint
+    source.connect(gainNode);
+    gainNode.connect(dest);
+  } catch (err) {
+    console.error('Audio routing failed:', err);
+  }
+}
+
+function applyAudioRouteMode(mode) {
+  audioRouteMode = mode;
+  document.querySelectorAll('.speakerBtn').forEach((b) => {
+    b.classList.toggle('btn-primary', b.dataset.route === mode);
+    b.classList.toggle('btn-ghost', b.dataset.route !== mode);
+  });
+  const dest = ensureRouteGraph();
+  const videoEl = document.getElementById('routeVideo');
+  const audioEl = document.getElementById('talkbackAudio');
+  if (!dest) return;
+  if (mode === 'speaker') {
+    videoEl.srcObject = dest.stream;
+    videoEl.muted = false;
+    videoEl.play().catch(() => {});
+    audioEl.srcObject = null;
+  } else {
+    audioEl.srcObject = dest.stream;
+    audioEl.muted = false;
+    audioEl.play().catch(() => {});
+    videoEl.srcObject = null;
+  }
+}
+
 function setupSpeakerToggle() {
   const wrap = document.getElementById('speakerToggleWrap');
   const msg = document.getElementById('speakerMsg');
   wrap.style.display = 'block';
 
-  const supported = typeof HTMLMediaElement !== 'undefined' && !!HTMLMediaElement.prototype.setSinkId;
-  const ctxSupported = typeof AudioContext !== 'undefined' && !!AudioContext.prototype.setSinkId;
-  if (!supported && !ctxSupported) {
-    msg.textContent = 'Your browser doesn\u2019t let a webpage switch this — use your phone\u2019s own volume/Bluetooth controls.';
-    return;
-  }
-
-  async function applyRoute(route) {
-    document.querySelectorAll('.speakerBtn').forEach((b) => {
-      b.classList.toggle('btn-primary', b.dataset.route === route);
-      b.classList.toggle('btn-ghost', b.dataset.route !== route);
-    });
-    try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const outputs = devices.filter((d) => d.kind === 'audiooutput');
-      const match = outputs.find((d) => new RegExp(route === 'earpiece' ? 'ear' : 'speaker', 'i').test(d.label));
-      const sinkId = match ? match.deviceId : (route === 'speaker' ? 'default' : null);
-      if (!sinkId) { msg.textContent = 'Couldn\u2019t find an earpiece output on this device.'; return; }
-      // This is the actual path most talkback/program audio plays through.
-      if (ctxSupported && sharedAudioCtx) await sharedAudioCtx.setSinkId(sinkId);
-      // Kept in sync too, in case the muted backup <audio> element ever becomes the active path.
-      if (supported) await document.getElementById('talkbackAudio').setSinkId(sinkId);
-      msg.textContent = 'Routed to ' + (route === 'earpiece' ? 'earpiece' : 'loudspeaker') + '.';
-    } catch (e) {
-      msg.textContent = 'Could not switch output: ' + e.message;
-    }
-  }
-
   document.querySelectorAll('.speakerBtn').forEach((btn) => {
-    btn.onclick = () => applyRoute(btn.dataset.route);
+    btn.onclick = () => {
+      applyAudioRouteMode(btn.dataset.route);
+      const isAndroid = /Android/i.test(navigator.userAgent);
+      if (btn.dataset.route === 'earpiece') {
+        msg.textContent = isAndroid
+          ? 'Android browsers can\u2019t route to the earpiece from a webpage — this will still play through the speaker.'
+          : (localStream.getVideoTracks().length
+              ? 'Turn your camera off for the best chance at earpiece routing — with camera on, iPhone forces the speaker.'
+              : 'Hold the phone to your ear like a normal call.');
+      } else {
+        msg.textContent = '';
+      }
+    };
   });
-  applyRoute('speaker');
+
+  // Default: camera on -> loudspeaker (you're on video anyway); camera off
+  // -> try phone-call mode, since that's the scenario it was asked for.
+  const hasVideo = localStream && localStream.getVideoTracks().length > 0;
+  applyAudioRouteMode(hasVideo ? 'speaker' : 'earpiece');
 }
 
 function setupMicMeter(stream) {
@@ -392,12 +452,7 @@ async function getOrCreatePC(remoteId, purpose) {
       console.log('[program feed] ontrack fired, audio tracks:', stream.getAudioTracks().length);
       if (!sharedAudioCtx) { console.warn('[program feed] no sharedAudioCtx yet - was Join tapped?'); return; }
       if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume().catch(() => {});
-      try {
-        const src = sharedAudioCtx.createMediaStreamSource(stream);
-        src.connect(sharedAudioCtx.destination);
-      } catch (err) {
-        console.error('Program audio routing failed:', err);
-      }
+      routeIncomingStream(stream);
     };
   }
 
@@ -405,33 +460,9 @@ async function getOrCreatePC(remoteId, purpose) {
     // Admin is whispering privately to this caller only — never sent to DJs.
     pc.ontrack = (e) => {
       const stream = e.streams[0];
-
-      // Primary path: pipe the incoming stream through the shared
-      // AudioContext straight to speakers. This context was created (and
-      // resumed) inside the Join button's click, so it's already unlocked -
-      // no separate autoplay permission check applies to routing audio
-      // through an existing running context, which is what makes this more
-      // reliable than <audio>.play() on Android Chrome after the tab has
-      // been idle for a while in the waiting room.
-      if (sharedAudioCtx) {
-        if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume().catch(() => {});
-        try {
-          const src = sharedAudioCtx.createMediaStreamSource(stream);
-          src.connect(sharedAudioCtx.destination);
-        } catch (err) {
-          console.error('Talkback Web Audio routing failed:', err);
-        }
-      }
-
-      // Backup path: also try the plain <audio> element, muted, purely so
-      // there's a second attempt in browsers where the above fails for some
-      // reason. Muted avoids doubled/echoed audio if both paths succeed.
-      const audioEl = document.getElementById('talkbackAudio');
-      if (audioEl) {
-        audioEl.srcObject = stream;
-        audioEl.muted = true;
-        audioEl.play().catch(() => {});
-      }
+      if (!sharedAudioCtx) return;
+      if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume().catch(() => {});
+      routeIncomingStream(stream);
     };
   }
 
