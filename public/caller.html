@@ -273,8 +273,25 @@ async function getOrCreatePC(remoteId, purpose) {
   const pc = new RTCPeerConnection(rtcConfig);
   peerConnections[key] = pc;
 
-  if (purpose !== 'talkback' && localStream) {
+  if (purpose !== 'talkback' && purpose !== 'program' && localStream) {
     localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+  }
+
+  if (purpose === 'program') {
+    // Continuous Line In / on-air feed the admin starts automatically as
+    // soon as this caller joins - autoplays via the shared AudioContext
+    // created at Join time (see above), no extra tap needed.
+    pc.ontrack = (e) => {
+      const stream = e.streams[0];
+      if (!sharedAudioCtx) return;
+      if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume().catch(() => {});
+      try {
+        const src = sharedAudioCtx.createMediaStreamSource(stream);
+        src.connect(sharedAudioCtx.destination);
+      } catch (err) {
+        console.error('Program audio routing failed:', err);
+      }
+    };
   }
 
   if (purpose === 'talkback') {
