@@ -81,6 +81,7 @@
         <button type="button" class="btn-ghost speakerBtn" data-route="earpiece" style="flex:1;">📱 Phone-call mode</button>
       </div>
       <div id="speakerMsg" class="subtitle" style="margin-top:6px; font-size:0.72rem;"></div>
+      <button type="button" class="btn-ghost" id="manualLockBtn" style="width:100%; margin-top:8px;">🔒 Lock screen now</button>
     </div>
     <div id="talkbackBanner" style="display:none; margin-top:10px;" class="status-pill">
       <span class="dot on"></span> 🎙️ Studio is talking to you
@@ -91,6 +92,23 @@
       <span class="tip-icon">🎧</span>
       <span><strong>Tip:</strong> earphones or a headset give the cleanest sound on air — speaker audio can echo into your mic.</span>
     </div>
+    <div id="audioDebugWrap" style="margin-top:14px; text-align:left;">
+      <button type="button" class="btn-ghost" id="audioDebugToggle" style="width:100%; font-size:0.72rem;">🐞 Show audio debug info</button>
+      <pre id="audioDebugText" style="display:none; margin-top:8px; font-size:0.66rem; white-space:pre-wrap; background:var(--panel-3); border:1px solid var(--border); border-radius:8px; padding:10px; color:var(--muted);"></pre>
+    </div>
+  </div>
+
+  <!-- Full-screen lock so the phone can't be bumped/tapped while held to the
+       ear in "phone-call mode". Can't actually power the display off (no
+       browser exposes that to a webpage) - this blacks it out and swallows
+       all touches instead, with a deliberate press-and-hold to get back in
+       so a stray touch near your cheek/ear doesn't unlock it by accident. -->
+  <div id="screenLockOverlay" style="display:none; position:fixed; inset:0; background:#000; z-index:9999; color:#fff; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px;">
+    <div style="font-size:2.4rem; margin-bottom:14px;">🔒</div>
+    <div style="font-weight:700; font-family:var(--font-display); margin-bottom:8px;">Screen locked — phone-call mode</div>
+    <div class="subtitle" style="margin-bottom:26px; max-width:280px;">This just blocks accidental taps while the phone's near your ear. Your call keeps going — it doesn't hang up or mute you.</div>
+    <button id="unlockHoldBtn" style="width:170px; height:170px; border-radius:50%; border:2px solid rgba(255,255,255,0.35); background:rgba(255,255,255,0.08); color:#fff; font-size:0.85rem; font-weight:700; touch-action:none;">Press &amp; hold<br>to unlock</button>
+    <div id="unlockProgressLabel" class="subtitle" style="margin-top:16px; font-size:0.72rem;"></div>
   </div>
 
   <div id="messageBanner" style="display:none; margin-top:16px;" class="card">
@@ -131,6 +149,7 @@ let rtcConfig = null;
 // elements are subject to (this is what was still silent on Android Chrome
 // after the tab had been sitting in the waiting room for a bit).
 let sharedAudioCtx = null;
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
 RTC_CONFIG_PROMISE.then((cfg) => { rtcConfig = cfg; });
 
 // ---- Step 0: detect Facebook/Messenger/Instagram/TikTok in-app browsers ----
@@ -386,7 +405,7 @@ function routeIncomingStream(stream) {
   }
 }
 
-function applyAudioRouteMode(mode) {
+function applyAudioRouteMode(mode, autoLock) {
   audioRouteMode = mode;
   document.querySelectorAll('.speakerBtn').forEach((b) => {
     b.classList.toggle('btn-primary', b.dataset.route === mode);
@@ -395,19 +414,77 @@ function applyAudioRouteMode(mode) {
   const dest = ensureRouteGraph();
   const videoEl = document.getElementById('routeVideo');
   const audioEl = document.getElementById('talkbackAudio');
-  if (!dest) return;
-  if (mode === 'speaker') {
-    videoEl.srcObject = dest.stream;
-    videoEl.muted = false;
-    videoEl.play().catch(() => {});
-    audioEl.srcObject = null;
-  } else {
-    audioEl.srcObject = dest.stream;
-    audioEl.muted = false;
-    audioEl.play().catch(() => {});
-    videoEl.srcObject = null;
+  if (dest) {
+    if (mode === 'speaker') {
+      videoEl.srcObject = dest.stream;
+      videoEl.muted = false;
+      videoEl.play().catch(() => {});
+      audioEl.srcObject = null;
+    } else {
+      audioEl.srcObject = dest.stream;
+      audioEl.muted = false;
+      audioEl.play().catch(() => {});
+      videoEl.srcObject = null;
+    }
+  }
+  // autoLock is only passed true from real mode switches (manual button tap
+  // or the host remotely toggling the camera) - not from the initial
+  // silent default at join, so the screen doesn't lock itself before the
+  // caller has even seen the waiting room.
+  if (autoLock) {
+    if (mode === 'earpiece') lockScreen(); else unlockScreen();
   }
 }
+
+// ---- Screen lock (blocks accidental taps in phone-call mode) ----
+// Can't truly power the display off - no browser API exposes that to a
+// webpage - so this blacks out the screen with an overlay and swallows all
+// touches, with a deliberate press-and-hold to exit (a quick accidental
+// tap/graze near the ear won't unlock it).
+let screenLocked = false;
+let unlockHoldTimer = null;
+let unlockHoldStart = 0;
+const UNLOCK_HOLD_MS = 1200;
+
+function lockScreen() {
+  if (screenLocked) return;
+  screenLocked = true;
+  document.getElementById('screenLockOverlay').style.display = 'flex';
+}
+
+function unlockScreen() {
+  screenLocked = false;
+  document.getElementById('screenLockOverlay').style.display = 'none';
+  const label = document.getElementById('unlockProgressLabel');
+  if (label) label.textContent = '';
+}
+
+function setupLockOverlay() {
+  const btn = document.getElementById('unlockHoldBtn');
+  const label = document.getElementById('unlockProgressLabel');
+  const start = (e) => {
+    e.preventDefault();
+    unlockHoldStart = Date.now();
+    label.textContent = 'Keep holding…';
+    clearInterval(unlockHoldTimer);
+    unlockHoldTimer = setInterval(() => {
+      if (Date.now() - unlockHoldStart >= UNLOCK_HOLD_MS) {
+        clearInterval(unlockHoldTimer);
+        unlockScreen();
+      }
+    }, 50);
+  };
+  const cancel = () => {
+    clearInterval(unlockHoldTimer);
+    if (screenLocked) label.textContent = 'Press and hold for a second to unlock.';
+  };
+  btn.addEventListener('pointerdown', start);
+  btn.addEventListener('pointerup', cancel);
+  btn.addEventListener('pointerleave', cancel);
+  btn.addEventListener('pointercancel', cancel);
+  document.getElementById('manualLockBtn').addEventListener('click', () => lockScreen());
+}
+setupLockOverlay();
 
 function setupSpeakerToggle() {
   const wrap = document.getElementById('speakerToggleWrap');
@@ -416,12 +493,11 @@ function setupSpeakerToggle() {
 
   document.querySelectorAll('.speakerBtn').forEach((btn) => {
     btn.onclick = () => {
-      applyAudioRouteMode(btn.dataset.route);
-      const isAndroid = /Android/i.test(navigator.userAgent);
+      applyAudioRouteMode(btn.dataset.route, true);
       if (btn.dataset.route === 'earpiece') {
-        msg.textContent = isAndroid
-          ? 'Android browsers can\u2019t route to the earpiece from a webpage — this will still play through the speaker.'
-          : (localStream.getVideoTracks().length
+        msg.textContent = IS_ANDROID
+          ? 'Android can\u2019t route audio to the earpiece from a webpage, so this still plays through the speaker \u2014 but the screen is now locked so it won\u2019t get bumped near your ear.'
+          : (localStream.getVideoTracks().length && localStream.getVideoTracks()[0].enabled
               ? 'Turn your camera off for the best chance at earpiece routing — with camera on, iPhone forces the speaker.'
               : 'Hold the phone to your ear like a normal call.');
       } else {
@@ -577,11 +653,46 @@ socket.on('media-control', ({ audio, video }) => {
     // Follow the camera state: on -> loudspeaker (you're on video anyway),
     // off -> try phone-call/earpiece mode.
     if (localStream.getVideoTracks().length) {
-      applyAudioRouteMode(video ? 'speaker' : 'earpiece');
+      applyAudioRouteMode(video ? 'speaker' : 'earpiece', true);
     }
   }
   statusEl.textContent = parts.join(' · ');
 });
+
+// ---- On-page audio debug (for phones with no way to open dev tools) ----
+let audioDebugInterval = null;
+document.getElementById('audioDebugToggle').onclick = () => {
+  const pre = document.getElementById('audioDebugText');
+  const showing = pre.style.display !== 'none';
+  if (showing) {
+    pre.style.display = 'none';
+    clearInterval(audioDebugInterval);
+  } else {
+    pre.style.display = 'block';
+    updateAudioDebug();
+    audioDebugInterval = setInterval(updateAudioDebug, 500);
+  }
+};
+
+function updateAudioDebug() {
+  const pre = document.getElementById('audioDebugText');
+  if (!pre) return;
+  const videoEl = document.getElementById('routeVideo');
+  const audioEl = document.getElementById('talkbackAudio');
+  const micTrack = localStream && localStream.getAudioTracks()[0];
+  const platform = IS_ANDROID ? 'Android' : (/iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'iOS' : 'other');
+  const lines = [
+    'Platform: ' + platform,
+    'Route mode: ' + audioRouteMode,
+    'Screen locked: ' + screenLocked,
+    'AudioContext state: ' + (sharedAudioCtx ? sharedAudioCtx.state : 'not created yet'),
+    'routeVideo (speaker path): paused=' + videoEl.paused + ' muted=' + videoEl.muted + ' hasSrc=' + !!videoEl.srcObject + ' t=' + videoEl.currentTime.toFixed(1),
+    'talkbackAudio (earpiece path): paused=' + audioEl.paused + ' muted=' + audioEl.muted + ' hasSrc=' + !!audioEl.srcObject + ' t=' + audioEl.currentTime.toFixed(1),
+    'Mic track: ' + (micTrack ? (micTrack.enabled ? 'enabled' : 'disabled') + ', ' + micTrack.readyState : 'none'),
+    'Program feed status: ' + (document.getElementById('programStatusLine').textContent || ''),
+  ];
+  pre.textContent = lines.join('\n');
+}
 
 // ---- Chat with the studio ----
 function appendChatMsg(from, text) {
