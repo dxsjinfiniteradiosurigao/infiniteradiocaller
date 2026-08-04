@@ -86,7 +86,7 @@
       <span class="dot on"></span> 🎙️ Studio is talking to you
     </div>
     <audio id="talkbackAudio" playsinline style="display:none;"></audio>
-    <video id="routeVideo" playsinline autoplay muted style="display:none; width:2px; height:2px;"></video>
+    <video id="routeVideo" playsinline autoplay muted style="position:fixed; left:-9999px; top:0; width:2px; height:2px; opacity:0;"></video>
     <div class="tip-banner">
       <span class="tip-icon">🎧</span>
       <span><strong>Tip:</strong> earphones or a headset give the cleanest sound on air — speaker audio can echo into your mic.</span>
@@ -117,6 +117,11 @@ socket.on('connect', () => {
   if (joinedName) socket.emit('register', { role: 'caller', name: joinedName });
 });
 let localStream = null;
+// Self-preview uses a CLONE of the camera track, kept enabled=true always,
+// so the caller can still see themselves while the real track (in
+// localStream, the one actually sent over WebRTC) starts disabled and only
+// turns on when the admin flips "Cam: on" - see grantBtn handler below.
+let selfPreviewStream = null;
 const peerConnections = {}; // remoteId -> RTCPeerConnection
 let rtcConfig = null;
 // Created inside the Join button's click handler so it starts in the
@@ -205,9 +210,21 @@ document.getElementById('grantBtn').onclick = async () => {
   document.getElementById('joinCard').style.display = 'block';
 
   if (localStream.getVideoTracks().length) {
+    const camTrack = localStream.getVideoTracks()[0];
+    // Camera stays off for the admin/DJs/vmix until the host turns it on
+    // from the admin panel - see the media-control handler below. We still
+    // want the caller to see themselves, so we clone the track for the
+    // on-screen preview only; the clone's own enabled flag is independent
+    // of the original, so disabling the original (the one actually sent
+    // over WebRTC) doesn't blank the caller's own preview.
+    camTrack.enabled = false;
+    const previewTrack = camTrack.clone();
+    previewTrack.enabled = true;
+    selfPreviewStream = new MediaStream([previewTrack]);
+
     const preview = document.getElementById('selfPreviewJoin');
     preview.style.display = 'block';
-    preview.srcObject = localStream;
+    preview.srcObject = selfPreviewStream;
     document.getElementById('orientToggleWrap').style.display = 'block';
     applyOrientation(orientationMode);
   }
@@ -314,7 +331,7 @@ document.getElementById('joinBtn').onclick = () => {
   if (hasVideo) {
     const preview = document.getElementById('selfPreview');
     preview.style.display = 'block';
-    preview.srcObject = localStream;
+    preview.srcObject = selfPreviewStream;
   }
 
   sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -413,10 +430,13 @@ function setupSpeakerToggle() {
     };
   });
 
-  // Default: camera on -> loudspeaker (you're on video anyway); camera off
-  // -> try phone-call mode, since that's the scenario it was asked for.
-  const hasVideo = localStream && localStream.getVideoTracks().length > 0;
-  applyAudioRouteMode(hasVideo ? 'speaker' : 'earpiece');
+  // Default: camera actively on -> loudspeaker; camera off (including the
+  // normal starting state, where the host hasn't turned it on yet) -> try
+  // phone-call mode. Checks the track's enabled state, not just whether a
+  // camera exists, since the camera now starts disabled until the host
+  // turns it on (see media-control handler below).
+  const videoTrack = localStream && localStream.getVideoTracks()[0];
+  applyAudioRouteMode(videoTrack && videoTrack.enabled ? 'speaker' : 'earpiece');
 }
 
 function setupMicMeter(stream) {
@@ -554,6 +574,11 @@ socket.on('media-control', ({ audio, video }) => {
   if (typeof video === 'boolean') {
     localStream.getVideoTracks().forEach((t) => (t.enabled = video));
     parts.push('Camera ' + (video ? 'on' : 'turned off by host'));
+    // Follow the camera state: on -> loudspeaker (you're on video anyway),
+    // off -> try phone-call/earpiece mode.
+    if (localStream.getVideoTracks().length) {
+      applyAudioRouteMode(video ? 'speaker' : 'earpiece');
+    }
   }
   statusEl.textContent = parts.join(' · ');
 });
