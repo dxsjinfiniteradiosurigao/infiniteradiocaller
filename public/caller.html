@@ -405,17 +405,27 @@ function routeIncomingStream(stream) {
   }
 }
 
-function applyAudioRouteMode(mode, autoLock) {
-  audioRouteMode = mode;
+function applyAudioRouteMode(requestedMode, autoLock) {
+  // Android has no reliable, controllable earpiece output from a webpage.
+  // Worse: once the mic is actively capturing (echo cancellation needs
+  // input+output in the same session), Chrome on Android can silently
+  // route plain <audio>-element playback to the tiny earpiece speaker on
+  // its own - which sounds like "no audio" unless the phone is held right
+  // up to your ear. So on Android, always route the REAL audio through the
+  // <video> element path (the one confirmed to reliably play out loud) -
+  // "phone-call mode" there only locks the screen, it doesn't change where
+  // the sound comes out.
+  const effectiveMode = IS_ANDROID ? 'speaker' : requestedMode;
+  audioRouteMode = requestedMode;
   document.querySelectorAll('.speakerBtn').forEach((b) => {
-    b.classList.toggle('btn-primary', b.dataset.route === mode);
-    b.classList.toggle('btn-ghost', b.dataset.route !== mode);
+    b.classList.toggle('btn-primary', b.dataset.route === requestedMode);
+    b.classList.toggle('btn-ghost', b.dataset.route !== requestedMode);
   });
   const dest = ensureRouteGraph();
   const videoEl = document.getElementById('routeVideo');
   const audioEl = document.getElementById('talkbackAudio');
   if (dest) {
-    if (mode === 'speaker') {
+    if (effectiveMode === 'speaker') {
       videoEl.srcObject = dest.stream;
       videoEl.muted = false;
       videoEl.play().catch(() => {});
@@ -427,12 +437,8 @@ function applyAudioRouteMode(mode, autoLock) {
       videoEl.srcObject = null;
     }
   }
-  // autoLock is only passed true from real mode switches (manual button tap
-  // or the host remotely toggling the camera) - not from the initial
-  // silent default at join, so the screen doesn't lock itself before the
-  // caller has even seen the waiting room.
   if (autoLock) {
-    if (mode === 'earpiece') lockScreen(); else unlockScreen();
+    if (requestedMode === 'earpiece') lockScreen(); else unlockScreen();
   }
 }
 
@@ -506,13 +512,14 @@ function setupSpeakerToggle() {
     };
   });
 
-  // Default: camera actively on -> loudspeaker; camera off (including the
-  // normal starting state, where the host hasn't turned it on yet) -> try
-  // phone-call mode. Checks the track's enabled state, not just whether a
-  // camera exists, since the camera now starts disabled until the host
-  // turns it on (see media-control handler below).
+  // Default: camera actively on -> loudspeaker. Camera off -> try
+  // phone-call/earpiece mode, but ONLY on iOS - Android has no reliable
+  // earpiece output and defaulting to it there is what caused audio to go
+  // silent-sounding (see applyAudioRouteMode above), so Android always
+  // defaults to the speaker path.
   const videoTrack = localStream && localStream.getVideoTracks()[0];
-  applyAudioRouteMode(videoTrack && videoTrack.enabled ? 'speaker' : 'earpiece');
+  const wantsEarpieceDefault = !IS_ANDROID && !(videoTrack && videoTrack.enabled);
+  applyAudioRouteMode(wantsEarpieceDefault ? 'earpiece' : 'speaker');
 }
 
 function setupMicMeter(stream) {
