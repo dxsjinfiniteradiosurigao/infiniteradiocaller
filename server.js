@@ -5,7 +5,15 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+// CORS is open here because this app only ever broadcasts non-sensitive,
+// already-public data over sockets (waiting-caller names, on-air status) —
+// the same trust level as everything else in this file, which lets any
+// socket register as any role with no auth. This also lets
+// call_notification_overlay.html (running on a completely different
+// studio-PC server) make its own direct connection here to listen for
+// "online-caller-live", since that overlay has no other way to reach a
+// server hosted separately (e.g. on Render).
+const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -131,7 +139,7 @@ io.on('connection', (socket) => {
         live: false,
         chat: [],
         audio: !settings.autoMuteOnJoin,
-        video: true
+        video: false
       };
       if (settings.autoMuteOnJoin) {
         socket.emit('media-control', { audio: false });
@@ -207,6 +215,11 @@ io.on('connection', (socket) => {
     djIds.forEach((djId) =>
       io.to(djId).emit('incoming-call', { callerId, name: callers[callerId].name })
     );
+    // Broadcast-only, no role/registration required to receive it — lets
+    // an external page (e.g. call_notification_overlay.html, connecting
+    // directly to this server from a completely different host) show its
+    // own "online caller" popup the moment someone here goes live.
+    io.emit('online-caller-live', { name: callers[callerId].name, ts: Date.now() });
     broadcastWaitingList();
     broadcastVmixState();
   });
